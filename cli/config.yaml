@@ -1,0 +1,55 @@
+log_level: info
+listen_addr: ":8080" # if using letsencrypt, this must be :80
+#tls:
+#  listen_addr: ":443"
+#  lets_encrypt:
+#    email: "glonek@gmail.com"
+#    domains:
+#      - "localhost"
+#      - "home.glonek.io"
+#    cache_dir: "/var/lib/goproxy/letsencrypt"
+#  certs:
+#    cert_file: "snakeoil.crt"
+#    key_file: "snakeoil.key"
+rules:
+  # proxy rule
+  - domain_match: 'localhost'
+    path_match: "/proxy"
+    token_auth:
+      tokens:
+        - "token1"
+        - "token2"
+      token_auth_header: "X-TOKEN"
+      forward_header: true
+    basic_auth:
+      user: "admin"
+      password: "password"
+      set_user_header: "X-USER"
+      set_user_get_var: "userget"
+    proxy_rule:
+      proxy_url: "http://127.0.0.1:8081/service"
+      proxy_target_accept_self_signed: false
+      # if true, request will be http://127.0.0.1:8081/service/proxy/{path}
+      # if false, request will be http://127.0.0.1:8081/service/{path}
+      proxy_append_path: true
+      proxy_remove_headers:
+        - "User-Agent"
+        - '^Sec-.*'
+      proxy_set_headers:
+        "X-BOB": "testcustomheader"
+      proxy_rewrite_host_header: "example.com"
+  # redirect rule
+  - domain_match: 'localhost'
+    path_match: "/redirect"
+    redirect_rule:
+      redirect_url: "http://192.168.4.32/bob"
+      redirect_status_code: 301
+  # serve rule
+  - domain_match: 'localhost'
+    path_match: "/serve"
+    serve_rule:
+      serve_local_dir: "./"
+  # catch all, use respond_rule
+  - respond_rule:
+      respond_status_code: 403
+      respond_body: "Forbidden"
