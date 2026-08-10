@@ -1,0 +1,26 @@
+# Automatic certificates from Let's Encrypt.
+#
+# Requirements:
+#   * listen_addr MUST end in :80 - the http-01 challenge is served there
+#   * tls.listen_addr is normally :443
+#   * every name in domains must resolve to this host
+#   * cache_dir must be writable; it is created if missing
+#
+# Ports below 1024 need root or CAP_NET_BIND_SERVICE.
+
+listen_addr: ":80"
+log_level: info
+
+tls:
+  listen_addr: ":443"
+  lets_encrypt:
+    email: "admin@example.com"
+    domains:
+      - "example.com"
+      - "www.example.com"
+    cache_dir: "/var/lib/goproxy/letsencrypt"
+
+rules:
+  - proxy_rule:
+      proxy_url: "http://127.0.0.1:8081"
+      proxy_append_path: true

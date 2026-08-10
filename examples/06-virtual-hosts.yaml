@@ -1,0 +1,27 @@
+# Route by hostname and path, the way a small reverse proxy is usually used.
+#
+# domain_match and path_match are plain prefix/exact matches unless the value
+# starts with '^', in which case it is treated as a regular expression.
+# The port is stripped from the Host header before domain_match is applied.
+
+listen_addr: ":8080"
+log_level: info
+
+rules:
+  # exact host, path prefix -> application backend
+  - domain_match: "app.example.com"
+    path_match: "/api"
+    proxy_rule:
+      proxy_url: "http://127.0.0.1:8081/api"
+      proxy_append_path: false # /api/v1/x is proxied as /v1/x
+      proxy_rewrite_host_header: "app.example.com"
+
+  # any subdomain of example.com -> static site
+  - domain_match: '^.*\.example\.com$'
+    serve_rule:
+      serve_local_dir: "/var/www/html"
+
+  # anything else
+  - respond_rule:
+      respond_status_code: 404
+      respond_body: "Not Found"

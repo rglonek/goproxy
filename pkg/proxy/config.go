@@ -60,7 +60,7 @@ func (l *LogLevel) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		*l = LogLevelWarn
 	case "error":
 		*l = LogLevelError
-	case "fatal":
+	case "fatal", "fail":
 		*l = LogLevelFatal
 	case "none":
 		*l = LogLevelNone
@@ -96,6 +96,9 @@ func (l *LogLevel) String() string {
 }
 
 func (c *TLS) Validate() error {
+	if c.ListenAddr == "" {
+		return fmt.Errorf("listen_addr is required")
+	}
 	if c.Certs != nil && c.LetsEncrypt != nil {
 		return fmt.Errorf("certs and lets_encrypt cannot be used together")
 	}
@@ -136,18 +139,19 @@ func (c *TLS) Validate() error {
 }
 
 func (c *Config) Validate() error {
-	if c.ListenAddr == "" {
-		return fmt.Errorf("listen_addr is required")
+	// at least one listener is required; listen_addr may be omitted to serve HTTPS only
+	if c.ListenAddr == "" && (c.TLS == nil || c.TLS.ListenAddr == "") {
+		return fmt.Errorf("listen_addr is required (omit it only when tls.listen_addr is set, to serve HTTPS only)")
 	}
 	if len(c.Rules) == 0 {
 		return fmt.Errorf("rules is required")
 	}
 	if c.TLS != nil {
 		if err := c.TLS.Validate(); err != nil {
-			return err
+			return fmt.Errorf("tls: %w", err)
 		}
 		if c.TLS.LetsEncrypt != nil && !strings.HasSuffix(c.ListenAddr, ":80") {
-			return fmt.Errorf("lets_encrypt requires non-TLS listen_addr to end with :80 for http auth challenge")
+			return fmt.Errorf("lets_encrypt requires listen_addr to end with :80 for the http-01 auth challenge")
 		}
 	}
 	if err := c.Rules.Validate(); err != nil {

@@ -1,0 +1,21 @@
+# Put HTTP basic auth in front of a backend.
+#
+#   ./goproxy -config examples/04-basic-auth.yaml
+#   curl -i http://localhost:8080/app/           # 401
+#   curl -u admin:password http://localhost:8080/app/
+#
+# The Authorization header is stripped before the request reaches the backend.
+# set_user_header/set_user_get_var pass the authenticated username on instead.
+
+listen_addr: ":8080"
+log_level: info
+
+rules:
+  - path_match: "/app"
+    basic_auth:
+      user: "admin"
+      password: "password"
+      set_user_header: "X-USER" # backend receives X-USER: admin
+    proxy_rule:
+      proxy_url: "http://127.0.0.1:8081"
+      proxy_append_path: true

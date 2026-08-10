@@ -1,0 +1,14 @@
+# The simplest useful config: forward everything to one backend.
+#
+#   ./goproxy -config examples/01-reverse-proxy.yaml
+#   curl http://localhost:8080/anything
+#
+# With no domain_match/path_match, the rule matches every request.
+
+listen_addr: ":8080"
+log_level: info
+
+rules:
+  - proxy_rule:
+      proxy_url: "http://127.0.0.1:8081"
+      proxy_append_path: true
