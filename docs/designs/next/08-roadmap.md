@@ -5,7 +5,7 @@ project stops after Phase 1, goproxy is meaningfully better and nothing is left
 half-migrated. Phases 1 and 2 do not depend on the redesign at all and could be
 merged next week.
 
-## Phase 1 — Harden what exists (no redesign)
+## Phase 1 — Harden what exists (no redesign) — **implemented**
 
 **Goal:** make the current code safe to expose to the internet.
 
@@ -32,7 +32,16 @@ merged next week.
 timeouts, which need the streaming exception (§5.1) and a release note.
 **Ships as:** v0.2.0.
 
-## Phase 2 — Fix the visible defects
+*As built:* phases 1 and 2 shipped together as v0.3.0. Q3 was answered (a) —
+timeouts on by default, with the streaming exception auto-detected from
+`Connection: Upgrade` and an explicit `streaming: true` for server-sent events.
+Q4 was answered as recommended: `trusted_proxies` is empty by default and a
+warning naming the peer is logged the first time an inbound `X-Forwarded-*` is
+dropped. Q7's `Authorization: Bearer` question is answered additively with an
+opt-in `accept_bearer`; `X-TOKEN` remains the default and prefix semantics are
+unchanged.
+
+## Phase 2 — Fix the visible defects — **implemented**
 
 **Goal:** the things users notice.
 

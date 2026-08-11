@@ -1,8 +1,20 @@
 # goproxy "next" — redesign proposal
 
-Status: **proposal / request for comment**. Nothing here is implemented; no
-behaviour of the shipping `v0.1.0` code changes as a result of merging this
-directory.
+Status: **partially implemented**. [Phases 1 and 2](08-roadmap.md) — safe
+defaults, lifecycle, the visible defects, tests and CI — are implemented; see
+[CHANGELOG.md](../../../CHANGELOG.md) for what landed and what changed
+behaviour. Phases 3 to 5 (the structural redesign, observability, and the new
+capability) are still proposals, and Phase 3 is gated on
+[Q2 and Q6](09-open-questions.md); Phase 5 is gated on
+[Q1](09-open-questions.md).
+
+The findings in [01-current-state.md](01-current-state.md) describe `v0.1.0` and
+are left as written, so that the reasoning behind each change stays readable;
+the ones fixed are listed in the changelog by their identifiers (R1, S5, C3 and
+so on). Still open after phases 1 and 2: **A1** (the request path is a chain of
+small stages now, but still one package and one `ServeHTTP` switch), **A2** (the
+config struct still carries the compiled state), **O1**, **O2** and **O3**
+(metrics, structured access logs, config reload).
 
 ## Why
 

@@ -1,0 +1,65 @@
+# Everything goproxy does by default, written out explicitly, plus the knobs
+# that are worth knowing about when it faces the internet.
+#
+#   ./goproxy -config examples/10-hardening.yaml -check
+#   ./goproxy -config examples/10-hardening.yaml
+#
+# None of this section is required: the values below are the defaults. Delete
+# the blocks you do not want to override.
+
+listen_addr: ":8080"
+log_level: info
+
+timeouts:
+  read_header: 10s # the Slowloris fix; nothing legitimate takes longer
+  read: 30s # headers plus body
+  write: 60s # not applied to upgrades or to `streaming: true` rules
+  idle: 120s # keep-alive reclaim
+  shutdown: 30s # how long a graceful shutdown waits for in-flight requests
+  upstream_dial: 10s
+  upstream_tls_handshake: 10s
+  upstream_response_header: 30s
+
+limits:
+  max_header_bytes: 1MiB
+  max_request_body: 32MiB # 0 disables the cap
+
+# Peers whose X-Forwarded-* headers are believed. Empty by default: from anyone
+# else those headers are dropped and rebuilt from the connection, and goproxy
+# logs a warning naming the peer the first time it happens. If goproxy runs
+# behind another proxy, that proxy belongs here.
+trusted_proxies: []
+#  - 127.0.0.1/32
+#  - 10.0.0.0/8
+
+# shutdown (default) stops the server when a listener fails, so a supervisor
+# restarts it. continue keeps the other listener serving.
+on_listener_error: shutdown
+
+rules:
+  # A long-lived response - server-sent events, a large download over a slow
+  # link - would be cut off by the write timeout. Mark the rule streaming.
+  # Websockets do not need the flag: the upgrade is visible in the request.
+  - name: events
+    path_match: "/events"
+    streaming: true
+    proxy_rule:
+      proxy_url: "http://127.0.0.1:8081"
+      proxy_append_path: true
+
+  - name: static
+    path_match: "/static"
+    serve_rule:
+      serve_local_dir: "./"
+      serve_index: ["index.html"]
+      serve_list_directories: false # off by default
+      serve_allow_dotfiles: false # .git and .env stay hidden
+      serve_cache_control: "public, max-age=3600"
+
+  - name: catch-all
+    respond_rule:
+      respond_status_code: 404
+      respond_body: "<h1>Not found</h1>"
+      respond_content_type: "text/html; charset=utf-8"
+      respond_headers:
+        X-Frame-Options: DENY

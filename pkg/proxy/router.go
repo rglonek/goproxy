@@ -1,165 +1,242 @@
 package proxy
 
 import (
-	"crypto/tls"
 	"io"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
-	"os"
-	"slices"
+	"runtime/debug"
 	"strings"
+	"time"
+
+	"github.com/rglonek/logger"
 )
 
-func (p *proxy) setRouter() error {
-	for _, rule := range p.config.Rules {
-		if rule.ProxyRule != nil {
-			remote, err := url.Parse(rule.ProxyRule.ProxyURL)
-			if err != nil {
-				return err
-			}
-			rule.ProxyRule.proxy = httputil.NewSingleHostReverseProxy(remote)
-			if rule.ProxyRule.ProxyTargetAcceptSelfSigned {
-				rule.ProxyRule.proxy.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-			}
-		}
-	}
-	return nil
+// handler is the terminal stage of the request pipeline: it matches a rule,
+// authenticates, and hands over to the rule's action.
+type handler struct {
+	server *Server
+	config *Config
+	log    *logger.Logger
 }
 
-type handler struct {
-	proxy *proxy
+func (h *handler) clientIP(r *http.Request) string {
+	return h.config.trusted.clientIP(r)
+}
+
+// buildPipeline assembles the per-server middleware chain once, at startup:
+//
+//	recover -> request body limit -> match -> authn -> action
+func (s *Server) buildPipeline() http.Handler {
+	h := &handler{server: s, config: s.config, log: s.log}
+	var chain http.Handler = h
+	chain = limitRequestBody(chain, s.config.maxRequestBody())
+	chain = recoverPanics(chain, s.log)
+	return chain
+}
+
+// recoverPanics turns a panicking rule into a 500 and a log line through the
+// configured logger. Without it net/http writes the panic to the standard
+// logger, which ignores the configured log level and sinks.
+func recoverPanics(next http.Handler, log *logger.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recorder := &statusRecorder{ResponseWriter: w}
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				return
+			}
+			if rec == http.ErrAbortHandler {
+				// the documented way for a handler to abort a response; net/http
+				// expects to see it
+				panic(rec)
+			}
+			log.Error("Client=%s Host=%s Path=%s Mod=Panic Error=%v\n%s", r.RemoteAddr, r.Host, r.URL.Path, rec, debug.Stack())
+			if !recorder.wrote {
+				http.Error(recorder, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(recorder, r)
+	})
+}
+
+// limitRequestBody caps how much of a request body a rule can be made to read.
+// A limit of 0 disables the cap.
+func limitRequestBody(next http.Handler, limit int64) http.Handler {
+	if limit <= 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			// MaxBytesReader tells the server to stop reading the rest of an
+			// oversized body, but only when it is given the server's own
+			// ResponseWriter - not a wrapper around it
+			r.Body = http.MaxBytesReader(unwrapResponseWriter(w), r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func unwrapResponseWriter(w http.ResponseWriter) http.ResponseWriter {
+	for {
+		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return w
+		}
+		w = unwrapper.Unwrap()
+	}
+}
+
+// statusRecorder remembers whether the response has been started, so the
+// recover middleware knows whether it can still write a 500. It forwards
+// everything else through Unwrap, which is how http.ResponseController reaches
+// the real writer for flushing, hijacking and deadlines.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (w *statusRecorder) WriteHeader(code int) {
+	if !w.wrote {
+		w.wrote = true
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusRecorder) Write(b []byte) (int, error) {
+	if !w.wrote {
+		w.wrote = true
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *statusRecorder) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// ReadFrom keeps the fast path net/http uses to send a file to the socket:
+// without it, wrapping the writer would cost every static file a copy through
+// user space.
+func (w *statusRecorder) ReadFrom(r io.Reader) (int64, error) {
+	if !w.wrote {
+		w.wrote = true
+		w.status = http.StatusOK
+	}
+	if readerFrom, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(r)
+	}
+	return io.Copy(w.ResponseWriter, r)
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	rule, index := h.proxy.config.Rules.Match(r.Host, r.URL.Path)
+	rule, _ := h.config.Rules.Match(r.Host, r.URL.Path)
 	if rule == nil {
-		h.proxy.log.Info("Client=%s Host=%s Path=%s Mod=NotFound", r.RemoteAddr, r.Host, r.URL.Path)
+		h.log.Info("Client=%s Host=%s Path=%s Mod=NotFound", h.clientIP(r), r.Host, r.URL.Path)
 		http.NotFound(w, r)
 		return
 	}
 
-	authType := "None"
-
-	// try token auth if enabled
-	if rule.TokenAuth != nil {
-		token := ""
-		if rule.TokenAuth.TokenAuthHeader != "" {
-			token = r.Header.Get(rule.TokenAuth.TokenAuthHeader)
-		} else {
-			token = r.Header.Get("X-TOKEN")
-		}
-		idx := slices.Index(rule.TokenAuth.Tokens, token)
-		if token == "" || idx == -1 {
-			h.proxy.log.Info("Client=%s Host=%s Path=%s Mod=TokenAuth Rule=%d Failed ReqToken=%s", r.RemoteAddr, r.Host, r.URL.Path, index, token)
-			if rule.BasicAuth == nil {
-				// token auth failed, and no basic auth is enabled, so we need to return 401
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-		} else {
-			// token auth succeeded, so we can continue
-			authType = "Token"
-			h.proxy.log.Info("Client=%s Host=%s Path=%s Mod=TokenAuth Rule=%d Success TokenIdx=%d", r.RemoteAddr, r.Host, r.URL.Path, index, idx)
-		}
+	// a write timeout would cut a websocket or an event stream off mid-flight,
+	// so those requests run without one
+	if rule.Streaming || isUpgradeRequest(r) {
+		clearDeadlines(w)
 	}
 
-	// try basic auth if enabled and token auth did not succeed
-	if authType == "None" && rule.BasicAuth != nil {
-		authType = "Basic"
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != rule.BasicAuth.User || pass != rule.BasicAuth.Pass {
-			h.proxy.log.Info("Client=%s Host=%s Path=%s Mod=BasicAuth User=%s Rule=%d Failed", r.RemoteAddr, r.Host, r.URL.Path, user, index)
-			w.Header().Set("WWW-Authenticate", "Basic")
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		h.proxy.log.Info("Client=%s Host=%s Path=%s Mod=BasicAuth User=%s Rule=%d Success", r.RemoteAddr, r.Host, r.URL.Path, user, index)
+	id, ok := h.authenticate(w, r, rule)
+	if !ok {
+		return
 	}
 
-	if rule.RedirectRule != nil {
-		h.proxy.log.Info("Client=%s Host=%s Path=%s AuthType=%s Mod=Redirect Target=%s Rule=%d", r.RemoteAddr, r.Host, r.URL.Path, authType, rule.RedirectRule.RedirectURL, index)
+	switch {
+	case rule.RedirectRule != nil:
+		h.log.Info("Client=%s Host=%s Path=%s AuthType=%s Mod=Redirect Target=%s Rule=%s", h.clientIP(r), r.Host, r.URL.Path, id.authType(), rule.RedirectRule.RedirectURL, rule)
 		http.Redirect(w, r, rule.RedirectRule.RedirectURL, rule.RedirectRule.RedirectStatusCode)
-		return
+
+	case rule.ServeRule != nil:
+		h.log.Info("Client=%s Host=%s Path=%s AuthType=%s Mod=Serve LocalDir=%s Rule=%s", h.clientIP(r), r.Host, r.URL.Path, id.authType(), rule.ServeRule.ServeLocalDir, rule)
+		stripped := rule.stripPathPrefix(r.URL.Path)
+		// what the strip removed is still part of the URL the client sees, so
+		// the file server needs it to build correct redirects
+		urlPrefix := strings.TrimSuffix(r.URL.Path, stripped)
+		setPath(r.URL, stripped)
+		rule.serveHandler.serve(w, r, urlPrefix)
+
+	case rule.RespondRule != nil:
+		h.respond(w, r, rule, id)
+
+	case rule.ProxyRule != nil:
+		h.proxy(w, r, rule, id)
+	}
+}
+
+func (h *handler) proxy(w http.ResponseWriter, r *http.Request, rule *Rule, id identity) {
+	h.log.Info("Client=%s Host=%s Path=%s AuthType=%s Mod=Proxy Target=%s Rule=%s", h.clientIP(r), r.Host, r.URL.Path, id.authType(), rule.ProxyRule.ProxyURL, rule)
+
+	id.stripConsumedCredentials(r, rule)
+	if id.method == authBasic {
+		if rule.BasicAuth.SetUserHeader != nil {
+			r.Header.Set(*rule.BasicAuth.SetUserHeader, id.user)
+		}
+		if rule.BasicAuth.SetUserGETVar != nil {
+			q := r.URL.Query()
+			q.Set(*rule.BasicAuth.SetUserGETVar, id.user)
+			r.URL.RawQuery = q.Encode()
+		}
 	}
 
-	if rule.ServeRule != nil {
-		h.proxy.log.Info("Client=%s Host=%s Path=%s AuthType=%s Mod=Serve LocalDir=%s Rule=%d", r.RemoteAddr, r.Host, r.URL.Path, authType, rule.ServeRule.ServeLocalDir, index)
-		if strings.HasPrefix(rule.PathMatch, "^") {
-			r.URL.Path = rule.pathRegex.ReplaceAllString(r.URL.Path, "")
-		} else {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, rule.PathMatch)
-		}
-		http.FileServer(http.Dir(rule.ServeRule.ServeLocalDir)).ServeHTTP(w, r)
-		return
+	if !rule.ProxyRule.ProxyAppendPath {
+		setPath(r.URL, rule.stripPathPrefix(r.URL.Path))
 	}
 
-	if rule.RespondRule != nil {
-		if rule.RespondRule.RespondBodyFile != "" {
-			fh, err := os.Open(rule.RespondRule.RespondBodyFile)
-			if err != nil {
-				h.proxy.log.Error("Client=%s Host=%s Path=%s Mod=Respond Error=%s Rule=%d", r.RemoteAddr, r.Host, r.URL.Path, err, index)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			defer fh.Close()
-			h.proxy.log.Info("Client=%s Host=%s Path=%s AuthType=%s Mod=Respond StatusCode=%d File=%s Rule=%d", r.RemoteAddr, r.Host, r.URL.Path, authType, rule.RespondRule.RespondStatusCode, rule.RespondRule.RespondBodyFile, index)
-			w.WriteHeader(rule.RespondRule.RespondStatusCode)
-			io.Copy(w, fh)
-		} else {
-			h.proxy.log.Info("Client=%s Host=%s Path=%s AuthType=%s Mod=Respond StatusCode=%d Body=%s Rule=%d", r.RemoteAddr, r.Host, r.URL.Path, authType, rule.RespondRule.RespondStatusCode, rule.RespondRule.RespondBody, index)
-			http.Error(w, rule.RespondRule.RespondBody, rule.RespondRule.RespondStatusCode)
-		}
-		return
-	}
-
-	if rule.ProxyRule != nil {
-		h.proxy.log.Info("Client=%s Host=%s Path=%s AuthType=%s Mod=Proxy Target=%s Rule=%d", r.RemoteAddr, r.Host, r.URL.Path, authType, rule.ProxyRule.ProxyURL, index)
-		if rule.ProxyRule.ProxyRewriteHostHeader != "" {
-			r.Host = rule.ProxyRule.ProxyRewriteHostHeader
-		}
-		if authType == "Token" && !rule.TokenAuth.ForwardHeader {
-			headerName := rule.TokenAuth.TokenAuthHeader
-			if headerName == "" {
-				headerName = "X-TOKEN"
-			}
-			r.Header.Del(headerName)
-		}
-		if authType == "Basic" {
-			r.Header.Del("Authorization")
-			if rule.BasicAuth.SetUserHeader != nil {
-				r.Header.Set(*rule.BasicAuth.SetUserHeader, rule.BasicAuth.User)
-			}
-			if rule.BasicAuth.SetUserGETVar != nil {
-				q := r.URL.Query()
-				q.Set(*rule.BasicAuth.SetUserGETVar, rule.BasicAuth.User)
-				r.URL.RawQuery = q.Encode()
-			}
-		}
-		if !rule.ProxyRule.ProxyAppendPath {
-			if strings.HasPrefix(rule.PathMatch, "^") {
-				r.URL.Path = rule.pathRegex.ReplaceAllString(r.URL.Path, "")
-			} else {
-				r.URL.Path = strings.TrimPrefix(r.URL.Path, rule.PathMatch)
-			}
-		}
-		for idx, header := range rule.ProxyRule.ProxyRemoveHeaders {
-			rx := rule.ProxyRule.proxyRemoveHeadersRegex[idx]
-			if rx != nil {
-				for k := range r.Header {
-					if rx.MatchString(k) {
-						r.Header.Del(k)
-					}
+	for idx, header := range rule.ProxyRule.ProxyRemoveHeaders {
+		rx := rule.ProxyRule.proxyRemoveHeadersRegex[idx]
+		if rx != nil {
+			for k := range r.Header {
+				if rx.MatchString(k) {
+					r.Header.Del(k)
 				}
-			} else {
-				r.Header.Del(header)
+			}
+		} else {
+			r.Header.Del(header)
+		}
+	}
+	for key, value := range rule.ProxyRule.ProxySetHeaders {
+		r.Header.Set(key, value)
+	}
+	rule.ProxyRule.proxy.ServeHTTP(w, r)
+}
+
+// setPath replaces the path of a URL, discarding the escaped form so that the
+// URL re-encodes from the value we just computed.
+func setPath(u *url.URL, path string) {
+	u.Path = path
+	u.RawPath = ""
+}
+
+// isUpgradeRequest reports whether the client asked to switch protocols, which
+// is how a websocket handshake starts.
+func isUpgradeRequest(r *http.Request) bool {
+	if r.Header.Get("Upgrade") == "" {
+		return false
+	}
+	for _, value := range r.Header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
 			}
 		}
-		for key, value := range rule.ProxyRule.ProxySetHeaders {
-			r.Header.Set(key, value)
-		}
-		rule.ProxyRule.proxy.ServeHTTP(w, r)
-		return
 	}
+	return false
+}
+
+// clearDeadlines removes the connection's read and write deadlines for the
+// current request. Errors are ignored on purpose: a ResponseWriter that does
+// not support deadlines (an httptest recorder, HTTP/2) simply has none to
+// clear.
+func clearDeadlines(w http.ResponseWriter) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Time{})
+	_ = rc.SetWriteDeadline(time.Time{})
 }
