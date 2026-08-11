@@ -30,6 +30,48 @@ Download the latest release from the [releases page](https://github.com/youruser
    ./goproxy -config config.yaml
    ```
 
+The smallest config that does something useful — forward every request to a
+backend on port 8081:
+
+```yaml
+listen_addr: ":8080"
+rules:
+  - proxy_rule:
+      proxy_url: "http://127.0.0.1:8081"
+      proxy_append_path: true
+```
+
+Serve a directory instead:
+
+```yaml
+listen_addr: ":8080"
+rules:
+  - serve_rule:
+      serve_local_dir: "/var/www/html"
+```
+
+Route by host and path, with a catch-all last (rules are evaluated in order and
+the first match wins):
+
+```yaml
+listen_addr: ":8080"
+rules:
+  - domain_match: "app.example.com"
+    path_match: "/api"
+    proxy_rule:
+      proxy_url: "http://127.0.0.1:8081"
+      proxy_append_path: true
+  - domain_match: "static.example.com"
+    serve_rule:
+      serve_local_dir: "/var/www/html"
+  - respond_rule:
+      respond_status_code: 404
+      respond_body: "Not Found"
+```
+
+More runnable examples — auth, TLS, Let's Encrypt, regex matching — are in
+[examples/](examples/), one config per topic.
+
 ### Full Example Configuration
 
 ```yaml
@@ -96,10 +138,10 @@ The configuration file uses YAML format and supports the following options:
 
 ### Top Level Options
 
-- `log_level`: (string) Logging level. Valid values: "detail", "debug", "info", "warn", "error", "fail", "none"
-- `listen_addr`: (string) Address and port to listen on for HTTP (e.g. ":8080"); if using letsencrypt in the TLS section, this must be set to ":80"
+- `log_level`: (string) Logging level. Valid values: "detail", "debug", "info", "warn", "error", "fatal" (also accepted as "fail"), "none"
+- `listen_addr`: (string) Address and port to listen on for HTTP (e.g. ":8080"); if using letsencrypt in the TLS section, this must be set to ":80". May be omitted to serve HTTPS only, in which case `tls.listen_addr` is required
 - `tls`: (object) TLS configuration
-  - `listen_addr`: (string) Address and port to listen on for HTTPS (e.g. ":443") 
+  - `listen_addr`: (string) Address and port to listen on for HTTPS (e.g. ":443"); required when a `tls` section is present
   - `lets_encrypt`: (object) Let's Encrypt configuration
     - `email`: (string) Email address for Let's Encrypt registration
     - `domains`: (array) List of domains to obtain certificates for
@@ -130,7 +172,7 @@ Rules must specify exactly one of the following actions:
 
 #### proxy_rule
 Proxies requests to another server
-- `proxy_url`: (string) Target URL to proxy requests to
+- `proxy_url`: (string, required) Target URL to proxy requests to
 - `proxy_target_accept_self_signed`: (bool) Whether to accept self-signed certificates
 - `proxy_append_path`: (bool) Whether to append matched path to target URL
 - `proxy_remove_headers`: (array) Headers to remove from request
@@ -139,15 +181,30 @@ Proxies requests to another server
 
 #### redirect_rule  
 Redirects requests to another URL
-- `redirect_url`: (string) URL to redirect to
-- `redirect_status_code`: (int) HTTP status code for redirect (e.g. 301, 302)
+- `redirect_url`: (string, required) URL to redirect to
+- `redirect_status_code`: (int, required) HTTP status code for redirect; must be 3xx (e.g. 301, 302)
 
 #### serve_rule
 Serves files from local directory
-- `serve_local_dir`: (string) Local directory path to serve files from
+- `serve_local_dir`: (string, required) Local directory path to serve files from; must exist at startup
 
 #### respond_rule
 Returns a static response; specify either a body string or file:
-- `respond_status_code`: (int) HTTP status code to return
+- `respond_status_code`: (int, required) HTTP status code to return
 - `respond_body`: (string) Response body content
 - `respond_body_file`: (string) File to read response body from
+
+## Troubleshooting
+
+The configuration is validated at startup; goproxy prints the reason and exits
+rather than starting with a config it cannot honour. Errors in the `rules` list
+are prefixed with the index of the rule that caused them, counting from zero:
+
+```
+Error parsing config file: rules[2]: proxy_rule: proxy_url is required
+```
+
+Note that unknown keys in the configuration file are ignored rather than
+reported, so if an option appears to have no effect, check its spelling and
+nesting against the reference above. A list of the common validation errors and
+what causes them is in [examples/README.md](examples/README.md#config-errors).

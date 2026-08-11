@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -145,18 +146,40 @@ func (r *Rule) Validate() error {
 	if notNil > 1 {
 		return fmt.Errorf("only one of proxy_rule, serve_rule, redirect_rule or respond_rule can be set")
 	}
+	if r.ProxyRule != nil {
+		if r.ProxyRule.ProxyURL == "" {
+			return fmt.Errorf("proxy_rule: proxy_url is required")
+		}
+		if _, err := url.Parse(r.ProxyRule.ProxyURL); err != nil {
+			return fmt.Errorf("proxy_rule: proxy_url is not a valid url: %w", err)
+		}
+	}
+	if r.RedirectRule != nil {
+		if r.RedirectRule.RedirectURL == "" {
+			return fmt.Errorf("redirect_rule: redirect_url is required")
+		}
+		if r.RedirectRule.RedirectStatusCode < 300 || r.RedirectRule.RedirectStatusCode > 399 {
+			return fmt.Errorf("redirect_rule: redirect_status_code must be a 3xx status code, got %d", r.RedirectRule.RedirectStatusCode)
+		}
+	}
 	if r.ServeRule != nil {
+		if r.ServeRule.ServeLocalDir == "" {
+			return fmt.Errorf("serve_rule: serve_local_dir is required")
+		}
 		if _, err := os.Stat(r.ServeRule.ServeLocalDir); os.IsNotExist(err) {
-			return fmt.Errorf("serve_local_dir does not exist: %w", err)
+			return fmt.Errorf("serve_rule: serve_local_dir does not exist: %s", r.ServeRule.ServeLocalDir)
 		}
 	}
 	if r.RespondRule != nil {
+		if r.RespondRule.RespondStatusCode < 100 || r.RespondRule.RespondStatusCode > 999 {
+			return fmt.Errorf("respond_rule: respond_status_code must be a valid http status code, got %d", r.RespondRule.RespondStatusCode)
+		}
 		if r.RespondRule.RespondBody != "" && r.RespondRule.RespondBodyFile != "" {
-			return fmt.Errorf("respond_body and respond_body_file cannot be set at the same time")
+			return fmt.Errorf("respond_rule: respond_body and respond_body_file cannot be set at the same time")
 		}
 		if r.RespondRule.RespondBodyFile != "" {
 			if _, err := os.Stat(r.RespondRule.RespondBodyFile); os.IsNotExist(err) {
-				return fmt.Errorf("respond_body_file does not exist: %w", err)
+				return fmt.Errorf("respond_rule: respond_body_file does not exist: %s", r.RespondRule.RespondBodyFile)
 			}
 		}
 	}
@@ -223,9 +246,9 @@ func (r *Rules) Match(host, path string) (*Rule, int) {
 }
 
 func (r *Rules) Validate() error {
-	for _, rule := range *r {
+	for i, rule := range *r {
 		if err := rule.Validate(); err != nil {
-			return err
+			return fmt.Errorf("rules[%d]: %w", i, err)
 		}
 	}
 	return nil

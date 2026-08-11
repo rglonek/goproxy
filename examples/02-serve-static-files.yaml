@@ -1,0 +1,14 @@
+# Serve a directory of static files.
+#
+#   ./goproxy -config examples/02-serve-static-files.yaml
+#   curl http://localhost:8080/
+#
+# serve_local_dir is resolved relative to the working directory goproxy is
+# started in, and must exist when the config is loaded.
+
+listen_addr: ":8080"
+log_level: info
+
+rules:
+  - serve_rule:
+      serve_local_dir: "./"
