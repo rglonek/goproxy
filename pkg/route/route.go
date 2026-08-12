@@ -4,6 +4,7 @@
 package route
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,8 @@ type Routes struct {
 
 	pools map[string]*upstream.Pool
 	log   *slog.Logger
+	// cancel stops the background work this table owns
+	cancel context.CancelFunc
 }
 
 // Rule is one compiled rule: a matcher and a fully assembled handler.
@@ -215,10 +218,22 @@ func (r *Routes) Rules() []*Rule { return r.rules }
 func (r *Routes) Pools() map[string]*upstream.Pool { return r.pools }
 
 // Start begins any background work the table owns, such as active health
-// checks.
+// checks. It stops when stop is closed or the table is closed, so a table
+// replaced by a reload does not leave anything running.
 func (r *Routes) Start(stop <-chan struct{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
+	if stop != nil {
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
 	for _, pool := range r.pools {
-		pool.Start(contextFrom(stop))
+		pool.Start(ctx)
 	}
 }
 
@@ -227,6 +242,9 @@ func (r *Routes) Start(stop <-chan struct{}) {
 func (r *Routes) Close() {
 	if r == nil {
 		return
+	}
+	if r.cancel != nil {
+		r.cancel()
 	}
 	for _, rule := range r.rules {
 		if rule.action != nil {

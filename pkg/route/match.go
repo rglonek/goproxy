@@ -1,7 +1,6 @@
 package route
 
 import (
-	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -148,18 +147,4 @@ func (r *Routes) Explain(host, path, method string) []Decision {
 		}
 	}
 	return decisions
-}
-
-// contextFrom turns a stop channel into a context, so that background work
-// started by the table stops with it.
-func contextFrom(stop <-chan struct{}) context.Context {
-	if stop == nil {
-		return context.Background()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-stop
-		cancel()
-	}()
-	return ctx
 }
