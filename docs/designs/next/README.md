@@ -1,20 +1,15 @@
 # goproxy "next" — redesign proposal
 
-Status: **partially implemented**. [Phases 1 and 2](08-roadmap.md) — safe
-defaults, lifecycle, the visible defects, tests and CI — are implemented; see
-[CHANGELOG.md](../../../CHANGELOG.md) for what landed and what changed
-behaviour. Phases 3 to 5 (the structural redesign, observability, and the new
-capability) are still proposals, and Phase 3 is gated on
-[Q2 and Q6](09-open-questions.md); Phase 5 is gated on
-[Q1](09-open-questions.md).
+Status: **implemented**. All five phases of [the roadmap](08-roadmap.md) have
+landed; [CHANGELOG.md](../../../CHANGELOG.md) records what shipped in which
+release, and the maintainer's answers to
+[the open questions](09-open-questions.md) are recorded there.
 
 The findings in [01-current-state.md](01-current-state.md) describe `v0.1.0` and
-are left as written, so that the reasoning behind each change stays readable;
-the ones fixed are listed in the changelog by their identifiers (R1, S5, C3 and
-so on). Still open after phases 1 and 2: **A1** (the request path is a chain of
-small stages now, but still one package and one `ServeHTTP` switch), **A2** (the
-config struct still carries the compiled state), **O1**, **O2** and **O3**
-(metrics, structured access logs, config reload).
+are left as written, so the reasoning behind each change stays readable. The
+architecture in [03-architecture.md](03-architecture.md) is what the code now
+does, with one deliberate difference: packages live under `pkg/` rather than
+`internal/`, because Q2 was answered "keep things importable".
 
 ## Why
 

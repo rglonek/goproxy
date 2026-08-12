@@ -13,7 +13,7 @@ import (
 // commit and date are read from the embedded VCS stamp when they are not set
 // explicitly, so a `go build` of a clean checkout still reports them.
 var (
-	version   = "0.3.0"
+	version   = "1.0.0-dev"
 	commit    = ""
 	buildDate = ""
 )

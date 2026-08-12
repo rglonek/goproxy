@@ -3,11 +3,13 @@
 Small, single-purpose configs. Each one runs on its own:
 
 ```bash
-./goproxy -config examples/01-reverse-proxy.yaml
+./goproxy -config examples/01-reverse-proxy.yaml -check   # validate it
+./goproxy -config examples/01-reverse-proxy.yaml          # run it
 ```
 
 Several examples proxy to `http://127.0.0.1:8081`. The repo ships a test backend
-that logs whatever it receives, which is handy for checking headers and GET vars:
+that logs whatever it receives, which is handy for checking headers and query
+parameters:
 
 ```bash
 go run ./test/logwww    # listens on :8081
@@ -18,56 +20,51 @@ go run ./test/logwww    # listens on :8081
 | [01-reverse-proxy.yaml](01-reverse-proxy.yaml) | Forward everything to one backend |
 | [02-serve-static-files.yaml](02-serve-static-files.yaml) | Serve a local directory |
 | [03-redirect-and-respond.yaml](03-redirect-and-respond.yaml) | Redirects, canned responses, rule ordering |
-| [04-basic-auth.yaml](04-basic-auth.yaml) | HTTP basic auth in front of a backend |
-| [05-token-auth.yaml](05-token-auth.yaml) | Static token auth on an API |
-| [06-virtual-hosts.yaml](06-virtual-hosts.yaml) | Routing by host and path, exact and regex |
-| [07-https-certs.yaml](07-https-certs.yaml) | TLS with your own certificate |
-| [08-https-only.yaml](08-https-only.yaml) | HTTPS with no plain HTTP listener |
-| [09-lets-encrypt.yaml](09-lets-encrypt.yaml) | Automatic certificates from Let's Encrypt |
-| [10-hardening.yaml](10-hardening.yaml) | Timeouts, size limits, trusted proxies, streaming rules |
+| [04-auth.yaml](04-auth.yaml) | Basic auth, token auth, and forward auth |
+| [05-virtual-hosts.yaml](05-virtual-hosts.yaml) | Routing by host and path: exact, wildcard, regex |
+| [06-https.yaml](06-https.yaml) | TLS with your own certificate, mutual TLS, HSTS |
+| [07-lets-encrypt.yaml](07-lets-encrypt.yaml) | Automatic certificates from Let's Encrypt |
+| [08-load-balancing.yaml](08-load-balancing.yaml) | Several targets, health checking, retries |
+| [09-hardening-and-observability.yaml](09-hardening-and-observability.yaml) | Every default written out, plus the admin listener |
 
-The full set of options, with every field documented, is the configuration
-reference in the [main README](../README.md).
+The full set of options is the configuration reference in the
+[main README](../README.md). Upgrading from v0.x? See
+[docs/MIGRATION.md](../docs/MIGRATION.md).
 
 ## Things worth knowing
 
-* **Rules are ordered.** The first rule whose `domain_match` and `path_match`
-  both match handles the request. A rule with neither matches everything, so
-  keep catch-alls last.
-* **`^` means regex.** `domain_match` and `path_match` are exact/prefix matches
-  unless the value starts with `^`, in which case it is compiled as a regular
-  expression.
-* **Exactly one action per rule.** `proxy_rule`, `serve_rule`, `redirect_rule`
-  and `respond_rule` are mutually exclusive.
-* **Unknown keys are reported.** A misspelled option is logged as a warning at
-  startup and then ignored:
-  `WARNING unknown config key ignored: line 6: field proxy_append_paths not found in type proxy.ProxyRule`.
-* **Check before you start.** `./goproxy -config <file> -check` loads, validates
-  and compiles the config and exits, without binding a port or creating
-  anything.
+* **Rules are ordered.** The first rule whose `match` applies handles the
+  request. A rule with no `match` matches everything, so keep catch-alls last.
+  `goproxy -config <file> explain <url>` prints the decision rule by rule.
+* **Exactly one action per rule.** `proxy`, `serve`, `redirect` and `respond`
+  are mutually exclusive.
+* **Unknown keys are an error.** A misspelled option stops startup rather than
+  being silently ignored; `-check` finds them without binding a port.
 * **The defaults are safe.** Timeouts, a request body cap, TLS 1.2 minimum, no
   directory listings and no credentials in logs apply whether or not the config
-  mentions them; see [10-hardening.yaml](10-hardening.yaml).
+  mentions them; see
+  [09-hardening-and-observability.yaml](09-hardening-and-observability.yaml).
 
 ## Config errors
 
-The config is validated at startup and goproxy exits with the reason. Rule
-errors are reported with the index of the offending rule, counting from zero:
+The config is compiled at startup and goproxy exits with the reason, naming the
+field:
 
 ```
-Error parsing config file: rules[2]: proxy_rule: proxy_url is required
+config: config.yaml: rules[2] (api).proxy.upstream: no upstream named "aap" (did you mean "app"?)
 ```
 
 Common ones:
 
 | Message | Cause |
 | --- | --- |
-| `listen_addr is required (omit it only when tls.listen_addr is set...)` | No listener configured at all |
-| `tls: listen_addr is required` | A `tls` section without its own `listen_addr` |
-| `lets_encrypt requires listen_addr to end with :80...` | Let's Encrypt needs port 80 for the http-01 challenge |
-| `invalid log level: ...` | Valid levels: `detail`, `debug`, `info`, `warn`, `error`, `fatal` (alias `fail`), `none` |
-| `rules[N]: serve_rule: serve_local_dir does not exist` | The directory is missing, or the path is relative to a different working directory |
-| `rules[N]: proxy_rule: proxy_url: must be an absolute http(s) URL` | `proxy_url` needs a scheme and a host, e.g. `http://127.0.0.1:8081` |
-| `rules[N]: rule is empty` | A `-` list item with nothing under it |
-| `tls: certs: tls: failed to find any PEM data...` | The certificate or key file is not a usable PEM pair |
+| `this looks like a goproxy v0.x config file` | The schema changed in v2; see [docs/MIGRATION.md](../docs/MIGRATION.md) |
+| `version: must be 2, got N` | Every config file starts with `version: 2` |
+| `field <name> not found in type ...` | A misspelled or misplaced key |
+| `listeners: at least one of http and https is required` | No listener configured |
+| `rules[N].proxy.url: must be an absolute http(s) URL` | `url` needs a scheme and a host, e.g. `http://127.0.0.1:8081` |
+| `rules[N].match.path: ... set path_mode: regex to use one` | A `^`-anchored pattern without `path_mode: regex` |
+| `rules[N].serve.dir: does not exist` | The directory is missing, or the path is relative to a different working directory |
+| `listeners.https.tls.acme: listeners.http.addr must end with :80` | Let's Encrypt needs port 80 for the http-01 challenge |
+| `no upstream named "x" (did you mean "y"?)` | A typo in `proxy.upstream`, or a missing `upstreams` entry |
 | `trusted_proxies[N]: must be an IP address or a CIDR` | Entries are `10.0.0.0/8` or `127.0.0.1`, not host names |

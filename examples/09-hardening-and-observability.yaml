@@ -1,0 +1,94 @@
+# Everything goproxy applies by default, written out explicitly, plus the
+# defensive options and the admin listener.
+#
+#   ./goproxy -config examples/09-hardening-and-observability.yaml -check
+#
+# None of the defaults section is required: the values below are what you get
+# without it. Delete the blocks you do not want to override.
+
+version: 2
+
+log:
+  level: info # detail|debug|info|warn|error|fatal|none
+  format: json # json|text; text on a terminal, json otherwise, when unset
+  access:
+    enabled: true
+    exclude_paths: ["/healthz"] # a 10s health check is 8,640 lines a day
+    redact_query_params: ["token", "key"]
+
+listeners:
+  http:
+    addr: ":8080"
+
+# Never routed to: health, metrics, the resolved config and reload live here so
+# that they cannot collide with a catch-all rule. Bind it to loopback.
+admin:
+  addr: "127.0.0.1:9090"
+  metrics: true
+  reload: true # POST /reload, same as SIGHUP
+  pprof: false
+
+defaults:
+  timeouts:
+    read_header: 10s # the Slowloris fix; nothing legitimate takes longer
+    read: 30s # headers plus body
+    write: 60s # not applied to upgrades or to `streaming: true` rules
+    idle: 120s # keep-alive reclaim
+    shutdown: 30s # how long a graceful shutdown waits for in-flight requests
+    upstream_dial: 10s
+    upstream_tls_handshake: 10s
+    upstream_response_header: 30s
+  limits:
+    max_header_bytes: 1MiB
+    max_request_body: 32MiB # 0 disables the cap
+
+# Peers whose X-Forwarded-* headers are believed. Empty by default: from anyone
+# else those headers are dropped and rebuilt from the connection, and goproxy
+# warns once, naming the peer. If goproxy runs behind another proxy, that proxy
+# belongs here.
+trusted_proxies: []
+#  - 127.0.0.1/32
+#  - 10.0.0.0/8
+
+# shutdown (default) stops the server when a listener fails, so a supervisor
+# restarts it. continue keeps the other listeners serving.
+on_listener_error: shutdown
+
+rules:
+  # A long-lived response - server-sent events, a large download over a slow
+  # link - would be cut off by the write timeout. Mark the rule streaming.
+  # Websockets do not need the flag: the upgrade is visible in the request.
+  - name: events
+    match:
+      path: "/events"
+    streaming: true
+    proxy:
+      url: "http://127.0.0.1:8081"
+
+  # Blunt instruments, per rule: a token bucket, CIDR lists, a method list and a
+  # body cap.
+  - name: guarded
+    match:
+      path: "/api"
+      path_mode: segment
+      methods: [GET, POST]
+    rate_limit:
+      requests_per_second: 20
+      burst: 40
+      by: ip # or: identity, once authenticated
+    allow_ips: ["10.0.0.0/8"]
+    deny_ips: ["10.1.2.3/32"]
+    max_request_body: 1MiB
+    cors:
+      allow_origins: ["https://app.example.com"]
+      allow_methods: [GET, POST]
+      allow_headers: [Content-Type]
+      max_age: 600
+    proxy:
+      url: "http://127.0.0.1:8081"
+
+  - name: catch-all
+    respond:
+      status: 404
+      body: "<h1>Not found</h1>"
+      content_type: "text/html; charset=utf-8"

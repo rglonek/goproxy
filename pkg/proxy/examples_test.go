@@ -1,15 +1,17 @@
 package proxy
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"goproxy/pkg/config"
 )
 
-// TestExampleConfigs loads every config in examples/ with the current binary.
-// The examples point at paths that only exist on a real deployment
+// TestExampleConfigs loads and compiles every config in examples/ with the
+// current binary, so a documented option that no longer exists cannot go
+// unnoticed. The examples point at paths that only exist on a real deployment
 // (/var/www/html, /etc/ssl/...), so those are redirected into the test's temp
 // directory; nothing else about the files is changed.
 func TestExampleConfigs(t *testing.T) {
@@ -19,14 +21,20 @@ func TestExampleConfigs(t *testing.T) {
 	if err := os.MkdirAll(webroot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GOPROXY_DEPLOY_TOKEN", "deploy-token")
+
 	replacements := strings.NewReplacer(
 		"/var/www/html", webroot,
-		`serve_local_dir: "./"`, `serve_local_dir: "`+webroot+`"`,
-		"/etc/ssl/certs/example.com.crt", certFile,
-		"/etc/ssl/private/example.com.key", keyFile,
+		`dir: "./"`, `dir: "`+webroot+`"`,
 		"snakeoil.crt", certFile,
-		"snakeoil.key", keyFile,
+		"snakeoil.pem", keyFile,
 		"/var/lib/goproxy/letsencrypt", filepath.Join(dir, "acme"),
+		// bind to a port the test can actually take
+		`addr: ":8080"`, `addr: "127.0.0.1:0"`,
+		`addr: ":8443"`, `addr: "127.0.0.1:0"`,
+		`addr: ":80"`, `addr: "127.0.0.1:80"`, // acme needs the :80 suffix; nothing is bound here
+		`addr: ":443"`, `addr: "127.0.0.1:0"`,
+		`addr: "127.0.0.1:9090"`, `addr: "127.0.0.1:0"`,
 	)
 
 	files, err := filepath.Glob(filepath.Join("..", "..", "examples", "*.yaml"))
@@ -37,30 +45,6 @@ func TestExampleConfigs(t *testing.T) {
 		t.Fatal("no example configs found")
 	}
 
-	// what each example is documented to do, as (host, path) -> rule index
-	routes := map[string][]struct {
-		host  string
-		path  string
-		index int
-	}{
-		"01-reverse-proxy.yaml": {{"localhost", "/anything", 0}},
-		"03-redirect-and-respond.yaml": {
-			{"localhost", "/old-docs", 0},
-			{"localhost", "/old-docs/page", 0},
-			{"localhost", "/anything-else", 1},
-		},
-		"04-basic-auth.yaml": {{"localhost", "/app/page", 0}},
-		"05-token-auth.yaml": {{"localhost", "/api/v1", 0}},
-		"06-virtual-hosts.yaml": {
-			{"app.example.com", "/api/v1/x", 0},
-			{"app.example.com:8080", "/api", 0},
-			{"APP.example.com", "/api", 0},
-			{"app.example.com", "/other", 1},
-			{"static.example.com", "/index.html", 1},
-			{"somewhere.else", "/", 2},
-		},
-	}
-
 	for _, file := range files {
 		name := filepath.Base(file)
 		t.Run(name, func(t *testing.T) {
@@ -68,32 +52,62 @@ func TestExampleConfigs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			config, err := ParseConfig([]byte(replacements.Replace(string(raw))))
+			text := replacements.Replace(string(raw))
+			cfg, err := config.Parse([]byte(text))
 			if err != nil {
 				t.Fatalf("example does not load: %v", err)
 			}
-			if warnings := config.Warnings(); len(warnings) > 0 {
-				t.Errorf("example has unknown keys: %v", warnings)
-			}
-			// compiling is what proves the rules can actually run: upstream
-			// URLs, static directories, certificates and response bodies are
-			// all resolved here
-			server, err := New(config)
+			// compiling is what proves the rules can run: upstream URLs, static
+			// directories, certificates, secrets and response bodies are all
+			// resolved here
+			server, err := New(cfg)
 			if err != nil {
 				t.Fatalf("example does not compile: %v", err)
 			}
-			defer func() { _ = server.Shutdown(context.Background()) }()
-
-			for _, route := range routes[name] {
-				rule, index := config.Rules.Match(route.host, route.path)
-				if rule == nil {
-					t.Errorf("Match(%q, %q) matched no rule, want rules[%d]", route.host, route.path, route.index)
-					continue
-				}
-				if index != route.index {
-					t.Errorf("Match(%q, %q) = rules[%d], want rules[%d]", route.host, route.path, index, route.index)
-				}
-			}
+			server.Routes().Close()
 		})
+	}
+}
+
+// The examples are also the routing documentation, so a few of their documented
+// decisions are asserted directly.
+func TestVirtualHostExampleRoutes(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "examples", "05-virtual-hosts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	text := strings.ReplaceAll(string(raw), "/var/www/html", dir)
+	text = strings.ReplaceAll(text, `addr: ":8080"`, `addr: "127.0.0.1:0"`)
+	cfg, err := config.Parse([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Routes().Close()
+
+	tests := []struct {
+		host, path, method, want string
+	}{
+		{"app.example.com", "/api/v1", "GET", "api"},
+		// the method list only makes this rule skip; the wildcard host rule below
+		// still matches
+		{"app.example.com", "/api", "DELETE", "sites"},
+		{"static.example.com", "/index.html", "GET", "sites"},
+		{"alpha.example.net", "/x", "GET", "legacy"},
+		{"somewhere.else", "/", "GET", "catch-all"},
+	}
+	for _, test := range tests {
+		rule, _ := server.Routes().Match(test.host, test.path, test.method)
+		if rule == nil {
+			t.Errorf("%s %s%s matched nothing, want %s", test.method, test.host, test.path, test.want)
+			continue
+		}
+		if rule.Name != test.want {
+			t.Errorf("%s %s%s = %s, want %s", test.method, test.host, test.path, rule.Name, test.want)
+		}
 	}
 }

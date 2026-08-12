@@ -58,7 +58,7 @@ unchanged.
 **Size:** small–medium. **Risk:** low; three behaviour changes need release
 notes (listings, content type, unknown keys). **Ships as:** v0.3.0.
 
-## Phase 3 — The structural redesign
+## Phase 3 — The structural redesign — **implemented**
 
 **Goal:** the schema/runtime split and the pipeline
 ([03-architecture.md](03-architecture.md)). This is the phase that costs real
@@ -85,7 +85,7 @@ specification of correct behaviour.
 "same behaviour, new internals", which keeps the diff reviewable and the
 regression surface bounded. **Ships as:** v0.4.0.
 
-## Phase 4 — Observability and operations
+## Phase 4 — Observability and operations — **implemented**
 
 **Goal:** [G5](02-goals.md#22-goals) and [G7](02-goals.md#22-goals).
 
@@ -103,7 +103,7 @@ regression surface bounded. **Ships as:** v0.4.0.
 the log format, which is why it is gated behind `log.format` with the old
 human-readable style available. **Ships as:** v0.5.0.
 
-## Phase 5 — New capability
+## Phase 5 — New capability — **implemented**
 
 **Goal:** `FUTURE.md`, and the features the new model makes cheap.
 
@@ -156,3 +156,27 @@ Estimated end state: roughly 3–4k lines of implementation plus a comparable
 amount of test, against today's ~950 including tests. That is a real increase,
 and it should be weighed honestly — see [Q6](09-open-questions.md) on whether
 the project wants to be that size.
+
+## What was actually built
+
+Phases 1 and 2 shipped as v0.3.0; phases 3, 4 and 5 shipped together as v1.0.0,
+once the open questions were answered:
+
+* **Q1 — config v2, no backwards compatibility.** There is one schema, not two.
+  A v0.x file is detected and refused with a pointer to `docs/MIGRATION.md`,
+  which maps every old key to its new home. No `config migrate` command: a
+  migrator only pays for itself if v1 has to keep working.
+* **Q2 — everything importable under `pkg/`.** No `internal/`. Each package is
+  documented as a supported surface.
+* **Q3 — timeouts on by default**, with the streaming exception detected from
+  `Connection: Upgrade` and an explicit `streaming: true` for server-sent
+  events.
+* **Q4 — `trusted_proxies` empty by default**, with a warning naming the peer
+  the first time an inbound `X-Forwarded-*` is dropped.
+* **Q5 — form handling reshaped as a `webhook` action and left unbuilt.**
+  `FUTURE.md` describes the shape it would take.
+* **Q6 — yes to the size.** The original was a proof of concept.
+* **Q7 — as proposed.** Character-based prefixes stay the default with
+  `path_mode: segment` available and recommended; the HTTP → HTTPS redirect
+  stays automatic with `redirect_to_https` to turn it off; `X-TOKEN` stays the
+  default token header and `Authorization: Bearer` is accepted as well.

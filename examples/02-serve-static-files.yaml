@@ -3,12 +3,26 @@
 #   ./goproxy -config examples/02-serve-static-files.yaml
 #   curl http://localhost:8080/
 #
-# serve_local_dir is resolved relative to the working directory goproxy is
-# started in, and must exist when the config is loaded.
+# dir is resolved relative to the working directory goproxy starts in, and must
+# exist when the config is loaded. The directory is opened once at startup and
+# served through that handle, so a symlink pointing outside it is refused by the
+# kernel rather than followed.
 
-listen_addr: ":8080"
-log_level: info
+version: 2
+
+listeners:
+  http:
+    addr: ":8080"
 
 rules:
-  - serve_rule:
-      serve_local_dir: "./"
+  - name: site
+    match:
+      path: "/static"
+    serve:
+      dir: "./"
+      strip_prefix: "/static"
+      index: ["index.html"]
+      # both of these are off by default
+      list_directories: false
+      allow_dotfiles: false
+      cache_control: "public, max-age=3600"

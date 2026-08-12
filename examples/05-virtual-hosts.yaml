@@ -1,0 +1,43 @@
+# Routing by host and path: exact, wildcard and regex.
+#
+#   goproxy -config examples/05-virtual-hosts.yaml explain http://app.example.com/api/v1
+#
+# prints which rule would handle a request, and why the ones before it did not.
+
+version: 2
+
+listeners:
+  http:
+    addr: ":8080"
+
+rules:
+  # exact host, path prefix -> application backend
+  - name: api
+    match:
+      host: "app.example.com"
+      path: "/api"
+      methods: [GET, POST] # a request with another method falls through
+    proxy:
+      url: "http://127.0.0.1:8081"
+      strip_prefix: "/api" # /api/v1/x is forwarded as /v1/x
+      host_header: "app.internal" # by default the client's Host is forwarded
+
+  # any subdomain of example.com -> static site
+  - name: sites
+    match:
+      host: "*.example.com"
+    serve:
+      dir: "/var/www/html"
+
+  # a regular expression, when the two above are not enough
+  - name: legacy
+    match:
+      host: '^(alpha|beta)\.example\.net$'
+    proxy:
+      url: "http://127.0.0.1:8082"
+
+  # anything else
+  - name: catch-all
+    respond:
+      status: 404
+      body: "Not Found"

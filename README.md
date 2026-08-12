@@ -1,171 +1,119 @@
 # GoProxy
 
-A high-performance HTTP/HTTPS proxy server written in Go, designed for reverse proxy, load balancing, and request forwarding scenarios.
+A small reverse proxy: one binary in front of a handful of services on one host,
+configured by a file you wrote by hand, run by systemd.
 
 ## Features
 
-- **HTTP/HTTPS Proxy**: Full support for both HTTP and HTTPS protocols
-- **Serving Static Files**: Serve static files from a local directory
-- **Redirects**: Redirect certin endpoints to different targets
-- **Serve a custom response**: Server a custom response code and message
-- **Authentication**: Support for token and user basic auth
-- **Header management**: Allow removal, override and forwarding of headers and user names
-- **Reverse Proxy**: Route requests to backend services
-- **Request Filtering**: Filter requests based on various criteria
-- **SSL/TLS Termination**: Handle SSL certificates and termination
-- **Logging**: Comprehensive request and error logging
-- **Configuration**: YAML-based configuration for easy setup
-- **Safe defaults**: Timeouts, request size limits, TLS 1.2 minimum, correct
-  `X-Forwarded-*` handling and no credentials in logs, without configuring
+- **HTTP/HTTPS proxy** with several targets per rule, load balancing, health
+  checking and budgeted retries
+- **Static files**, redirects and canned responses
+- **Authentication**: basic (several users, bcrypt hashes), static tokens, or
+  handing the decision to another service
+- **Routing** by host (exact, wildcard, regex), path (prefix, exact, segment,
+  regex) and method, first match wins
+- **TLS termination**: your own certificates with SNI, Let's Encrypt, mutual
+  TLS, HSTS
+- **Observability**: structured access logs, Prometheus metrics, health and
+  readiness endpoints on a separate admin listener
+- **Reload** without dropping connections, on `SIGHUP` or an admin endpoint
+- **Safe defaults**: timeouts, request size limits, TLS 1.2 minimum, correct
+  `X-Forwarded-*` handling, no credentials in logs — without configuring
   anything ([see below](#safe-defaults))
 
-## Quick Start
+## Quick start
 
-### Download Binaries
+```bash
+# check the config without binding anything
+./goproxy -config config.yaml -check
 
-Download the latest release from the [releases page](https://github.com/yourusername/goproxy/releases) for your platform.
+# ask which rule would handle a request, and why the others did not
+./goproxy -config config.yaml explain https://app.example.com/api/v1
 
-### Basic Usage
-
-1. Create a `config.yaml` file with your configuration
-2. Check it without starting anything:
-   ```bash
-   ./goproxy -config config.yaml -check
-   ```
-3. Run the proxy server:
-   ```bash
-   ./goproxy -config config.yaml
-   ```
+# run it
+./goproxy -config config.yaml
+```
 
 The smallest config that does something useful — forward every request to a
 backend on port 8081:
 
 ```yaml
-listen_addr: ":8080"
-rules:
-  - proxy_rule:
-      proxy_url: "http://127.0.0.1:8081"
-      proxy_append_path: true
-```
+version: 2
 
-Serve a directory instead:
+listeners:
+  http:
+    addr: ":8080"
 
-```yaml
-listen_addr: ":8080"
 rules:
-  - serve_rule:
-      serve_local_dir: "/var/www/html"
+  - name: everything
+    proxy:
+      url: "http://127.0.0.1:8081"
 ```
 
 Route by host and path, with a catch-all last (rules are evaluated in order and
 the first match wins):
 
 ```yaml
-listen_addr: ":8080"
+version: 2
+
+listeners:
+  http:
+    addr: ":8080"
+
 rules:
-  - domain_match: "app.example.com"
-    path_match: "/api"
-    proxy_rule:
-      proxy_url: "http://127.0.0.1:8081"
-      proxy_append_path: true
-  - domain_match: "static.example.com"
-    serve_rule:
-      serve_local_dir: "/var/www/html"
-  - respond_rule:
-      respond_status_code: 404
-      respond_body: "Not Found"
+  - name: api
+    match:
+      host: "app.example.com"
+      path: "/api"
+    proxy:
+      url: "http://127.0.0.1:8081"
+      strip_prefix: "/api"
+
+  - name: static
+    match:
+      host: "static.example.com"
+    serve:
+      dir: "/var/www/html"
+
+  - name: catch-all
+    respond:
+      status: 404
+      body: "Not Found"
 ```
 
-More runnable examples — auth, TLS, Let's Encrypt, regex matching — are in
+Runnable examples — auth, TLS, Let's Encrypt, load balancing, hardening — are in
 [examples/](examples/), one config per topic.
 
-### Full Example Configuration
-
-```yaml
-log_level: info
-listen_addr: ":8080" # if using letsencrypt, this must be :80
-#tls:
-#  listen_addr: ":443"
-#  lets_encrypt:
-#    email: "glonek@gmail.com"
-#    domains:
-#      - "localhost"
-#      - "home.glonek.io"
-#    cache_dir: "/var/lib/goproxy/letsencrypt"
-#  certs:
-#    cert_file: "snakeoil.crt"
-#    key_file: "snakeoil.key"
-rules:
-  # proxy rule
-  - domain_match: 'localhost'
-    path_match: "/proxy"
-    token_auth:
-      tokens:
-        - "token1"
-        - "token2"
-      token_auth_header: "X-TOKEN"
-      forward_header: true
-    basic_auth:
-      user: "admin"
-      password: "password"
-      set_user_header: "X-USER"
-      set_user_get_var: "userget"
-    proxy_rule:
-      proxy_url: "http://127.0.0.1:8081/service"
-      proxy_target_accept_self_signed: false
-      # if true, request will be http://127.0.0.1:8081/service/proxy/{path}
-      # if false, request will be http://127.0.0.1:8081/service/{path}
-      proxy_append_path: true
-      proxy_remove_headers:
-        - "User-Agent"
-        - '^Sec-.*'
-      proxy_set_headers:
-        "X-BOB": "testcustomheader"
-      proxy_rewrite_host_header: "example.com"
-  # redirect rule
-  - domain_match: 'localhost'
-    path_match: "/redirect"
-    redirect_rule:
-      redirect_url: "http://192.168.4.32/bob"
-      redirect_status_code: 301
-  # serve rule
-  - domain_match: 'localhost'
-    path_match: "/serve"
-    serve_rule:
-      serve_local_dir: "./"
-  # catch all, use respond_rule
-  - respond_rule:
-      respond_status_code: 403
-      respond_body: "Forbidden"
-```
+**Upgrading from v0.x?** The schema changed shape; every old key has a new home.
+See [docs/MIGRATION.md](docs/MIGRATION.md).
 
 ## Safe defaults
 
-goproxy applies these without being asked. Every one of them can be overridden,
-and setting a timeout to `0` disables it.
+goproxy applies these without being asked. Every one can be overridden, and
+setting a timeout or a limit to `0` disables it.
 
 | Setting | Default | What it protects against |
 | --- | --- | --- |
-| `timeouts.read_header` | `10s` | A client that dribbles headers forever (Slowloris) |
-| `timeouts.read` | `30s` | A slow request body |
-| `timeouts.write` | `60s` | A slow reader holding a connection open |
-| `timeouts.idle` | `120s` | Keep-alive connections piling up |
-| `timeouts.shutdown` | `30s` | A shutdown that never finishes |
-| `limits.max_header_bytes` | `1MiB` | Oversized header blocks |
-| `limits.max_request_body` | `32MiB` | Unbounded uploads (`413` over the limit) |
-| `tls.min_version` | `1.2` | Obsolete TLS versions |
-| `serve_rule.serve_list_directories` | `false` | Accidentally listing a directory |
+| `defaults.timeouts.read_header` | `10s` | A client that dribbles headers forever (Slowloris) |
+| `defaults.timeouts.read` | `30s` | A slow request body |
+| `defaults.timeouts.write` | `60s` | A slow reader holding a connection open |
+| `defaults.timeouts.idle` | `120s` | Keep-alive connections piling up |
+| `defaults.timeouts.shutdown` | `30s` | A shutdown that never finishes |
+| `defaults.limits.max_header_bytes` | `1MiB` | Oversized header blocks |
+| `defaults.limits.max_request_body` | `32MiB` | Unbounded uploads (`413` over the limit) |
+| `listeners.https.tls.min_version` | `1.2` | Obsolete TLS versions |
+| `serve.list_directories` | `false` | Accidentally listing a directory |
+| `serve.allow_dotfiles` | `false` | Serving `.git` and `.env` |
 | `trusted_proxies` | empty | `X-Forwarded-For` spoofing by direct clients |
 
 The write timeout would cut off a long-lived response, so it is not applied to
 connection upgrades (websockets, detected automatically) or to rules marked
 `streaming: true` (server-sent events, large downloads over slow links).
 
-`trusted_proxies` decides whether goproxy believes the `X-Forwarded-*` headers
-a peer sends. From a peer that is not listed, those headers are dropped and
+`trusted_proxies` decides whether goproxy believes the `X-Forwarded-*` headers a
+peer sends. From a peer that is not listed, those headers are dropped and
 replaced with values taken from the connection itself, and a warning naming the
-peer is logged once. If goproxy runs behind another proxy, list that proxy's
-address there:
+peer is logged once. If goproxy runs behind another proxy, list it:
 
 ```yaml
 trusted_proxies:
@@ -173,132 +121,230 @@ trusted_proxies:
   - 10.0.0.0/8
 ```
 
-## Configuration Reference
+## Configuration reference
 
-The configuration file uses YAML format and supports the following options:
+Every config file starts with `version: 2`. Unknown keys are an error, so a
+misspelled option stops startup instead of being ignored.
 
-### Top Level Options
+### Top level
 
-- `log_level`: (string) Logging level. Valid values: "detail", "debug", "info", "warn", "error", "fatal" (also accepted as "fail"), "none"
-- `listen_addr`: (string) Address and port to listen on for HTTP (e.g. ":8080"); if using letsencrypt in the TLS section, this must be set to ":80". May be omitted to serve HTTPS only, in which case `tls.listen_addr` is required
-- `trusted_proxies`: (array) IPs or CIDRs of peers whose `X-Forwarded-*` headers are believed; empty by default
-- `on_listener_error`: (string) `shutdown` (default) stops the server when a listener fails; `continue` keeps the other listener serving
-- `timeouts`: (object) durations, written as `10s`, `1m30s` or a plain number of seconds
-  - `read_header`, `read`, `write`, `idle`, `shutdown`: server timeouts (see [Safe defaults](#safe-defaults))
-  - `upstream_dial` (10s), `upstream_tls_handshake` (10s), `upstream_response_header` (30s): applied when proxying
-- `limits`: (object) sizes, written as a number of bytes or as `32MiB`, `1MB`, `64KiB`
-  - `max_header_bytes`: (size) largest accepted request header block
-  - `max_request_body`: (size) largest accepted request body; `0` disables the limit
-- `tls`: (object) TLS configuration
-  - `listen_addr`: (string) Address and port to listen on for HTTPS (e.g. ":443"); required when a `tls` section is present
-  - `min_version` / `max_version`: (string) `1.0`, `1.1`, `1.2` or `1.3`; minimum defaults to `1.2`
-  - `lets_encrypt`: (object) Let's Encrypt configuration
-    - `email`: (string) Email address for Let's Encrypt registration
-    - `domains`: (array) List of domains to obtain certificates for
-    - `cache_dir`: (string) Directory to store Let's Encrypt cache/certificates; created at startup
-  - `certs`: (object) Manual TLS certificate configuration
-    - `cert_file`: (string) Path to certificate file
-    - `key_file`: (string) Path to private key file
-
-  The certificate is loaded and parsed at startup: a certificate that cannot be
-  used is a startup error, not a listener that fails every handshake. `SIGHUP`
-  re-reads it, so a renewal does not need a restart.
+| Key | Meaning |
+| --- | --- |
+| `log.level` | `detail`, `debug`, `info` (default), `warn`, `error`, `fatal`, `none` |
+| `log.format` | `json` or `text`; text on a terminal, json otherwise |
+| `log.access.enabled` | Request logging, on by default |
+| `log.access.exclude_paths` | Paths that are not logged, such as a health check |
+| `log.access.redact_query_params` | Query parameters whose value is replaced with `REDACTED` |
+| `listeners.http.addr` | Address for plain HTTP, e.g. `":80"` |
+| `listeners.http.redirect_to_https` | Redirect everything to https; defaults to true when an https listener exists |
+| `listeners.https.addr` | Address for HTTPS |
+| `listeners.https.tls` | See [TLS](#tls) |
+| `admin.addr` | Admin listener; off unless set. Bind it to loopback |
+| `admin.metrics` / `admin.reload` / `admin.pprof` | Endpoint switches |
+| `defaults.timeouts` / `defaults.limits` | See [Safe defaults](#safe-defaults) |
+| `trusted_proxies` | IPs or CIDRs whose `X-Forwarded-*` headers are believed |
+| `on_listener_error` | `shutdown` (default) or `continue` |
+| `auth` | Named authentication blocks |
+| `upstreams` | Named target pools |
+| `rules` | The ordered rule list |
 
 ### Rules
 
-The `rules` section contains an array of rule objects that define how requests should be handled. Rules are evaluated in order and the first matching rule is used.
+| Key | Meaning |
+| --- | --- |
+| `name` | Appears in logs, metrics and `explain`; defaults to `rules[N]` |
+| `match.host` | `app.example.com`, `*.example.com` or `^regex$`; empty matches every host. Case-insensitive |
+| `match.path` | Matched according to `path_mode`; empty matches every path |
+| `match.path_mode` | `prefix` (default), `exact`, `segment` (`/api` matches `/api` and `/api/v1` but not `/apifoo`), `regex` |
+| `match.methods` | Allowed methods; a request with another method falls through to the next rule |
+| `auth` | The name of an `auth` block |
+| `allow_ips` / `deny_ips` | CIDRs, evaluated before auth |
+| `rate_limit` | `requests_per_second`, `burst`, `by: ip\|identity` |
+| `cors` | `allow_origins`, `allow_methods`, `allow_headers`, `expose_headers`, `allow_credentials`, `max_age` |
+| `max_request_body` | Overrides `defaults.limits.max_request_body` |
+| `streaming` | The rule's responses are long-lived, so the write timeout is not applied |
 
-Each rule can have the following fields:
+Each rule ends in exactly one action:
 
-- `name`: (string) Optional name for the rule; it appears in log lines instead of `rules[N]`, so inserting a rule does not renumber every line
-- `domain_match`: (string) Domain name to match against request Host header; begin with '^' to use regex. Matching is case-insensitive
-- `path_match`: (string) Path prefix or regex to match against request URL path; begin with '^' to use regex
-- `streaming`: (bool) The rule's responses are long-lived (server-sent events, large downloads); the write timeout is not applied to them
-- `token_auth`: (object) Token-based authentication
-  - `tokens`: (array) List of valid tokens
-  - `token_auth_header`: (string) Header name to check for token (default: "X-TOKEN")
-  - `accept_bearer`: (bool) Also accept the token as `Authorization: Bearer <token>`
-  - `forward_header`: (bool) Whether to forward auth header to backend (proxy target only). When false, the header is stripped whether the token was accepted or rejected
-- `basic_auth`: (object) HTTP Basic authentication
-  - `user`: (string) Username
-  - `password`: (string) Password  
-  - `realm`: (string) Realm sent in the `WWW-Authenticate` challenge (default: "Restricted")
-  - `set_user_header`: (string) Optional header to set with authenticated username (proxy target only)
-  - `set_user_get_var`: (string) Optional GET parameter to set with authenticated username (proxy or static file hosting targets only)
+**`proxy`** — `upstream` (a named pool) or `url` (a single target),
+`strip_prefix`, `add_prefix`, `host_header`, `request_headers.{set,remove}`,
+`response_headers.{set,remove}`. `remove` entries are header names, or regular
+expressions when they start with `^`. The Host the client sent is forwarded
+unless `host_header` says otherwise; `X-Forwarded-For`, `-Host`, `-Proto` and
+`X-Real-Ip` are set from the connection.
 
-Credentials are compared in constant time, and a credential a client presented
-is never written to the log, at any level.
+**`serve`** — `dir`, `strip_prefix`, `index`, `list_directories`,
+`allow_dotfiles`, `cache_control`. The directory is opened once at startup and
+served through that handle, so a symlink out of it is refused by the kernel.
 
-Rules must specify exactly one of the following actions:
+**`redirect`** — `to`, `status`. `{path}` and `{query}` are filled in from the
+request.
 
-#### proxy_rule
-Proxies requests to another server
-- `proxy_url`: (string, required) Target URL to proxy requests to
-- `proxy_target_accept_self_signed`: (bool) Whether to accept self-signed certificates
-- `proxy_append_path`: (bool) Whether to append matched path to target URL
-- `proxy_remove_headers`: (array) Headers to remove from request
-- `proxy_set_headers`: (object) Headers to add/override in request
-- `proxy_rewrite_host_header`: (string) Override Host header sent to target
+**`respond`** — `status`, `body` or `body_file`, `content_type` (detected from
+the body when unset), `headers`, `reload`. `body_file` is read once at startup
+unless `reload: true`.
 
-#### redirect_rule  
-Redirects requests to another URL
-- `redirect_url`: (string, required) URL to redirect to
-- `redirect_status_code`: (int, required) HTTP status code for redirect; must be 3xx (e.g. 301, 302)
+### Auth
 
-The request is proxied with `X-Forwarded-For`, `X-Forwarded-Host`,
-`X-Forwarded-Proto` and `X-Real-Ip` set from the connection, subject to
-`trusted_proxies`. The Host header the client sent is forwarded unchanged unless
-`proxy_rewrite_host_header` says otherwise.
+An `auth` block is named and reusable. Within one, the authenticators are tried
+in the order token, basic, forward, and the first that accepts the request wins.
+The credential goproxy consumed is not passed upstream unless `forward: true`,
+and nothing a client presented is ever written to the log.
 
-#### serve_rule
-Serves files from local directory
-- `serve_local_dir`: (string, required) Local directory path to serve files from; must exist at startup
-- `serve_index`: (array) File names tried for a directory (default: `["index.html"]`)
-- `serve_list_directories`: (bool) Generate an index page for a directory with no index file (default: false)
-- `serve_allow_dotfiles`: (bool) Serve names starting with a dot, such as `.git` and `.env` (default: false)
-- `serve_cache_control`: (string) Value of the `Cache-Control` response header
-
-The directory is opened once at startup and served through it, so a symlink
-pointing outside the directory is refused by the kernel rather than followed.
-
-#### respond_rule
-Returns a static response; specify either a body string or file:
-- `respond_status_code`: (int, required) HTTP status code to return
-- `respond_body`: (string) Response body content
-- `respond_body_file`: (string) File to read response body from; read once at startup
-- `respond_body_file_reload`: (bool) Re-read `respond_body_file` on every request
-- `respond_content_type`: (string) `Content-Type` of the response; detected from the body when unset
-- `respond_headers`: (object) Additional response headers
-
-## Troubleshooting
-
-The configuration is validated at startup; goproxy prints the reason and exits
-rather than starting with a config it cannot honour. `-check` does the same
-without binding a port, creating a directory or contacting anything. Errors in
-the `rules` list are prefixed with the index of the rule that caused them,
-counting from zero (and its `name`, if it has one):
-
-```
-Error parsing config file: rules[2]: proxy_rule: proxy_url is required
+```yaml
+auth:
+  staff:
+    basic:
+      users:
+        - { user: alice, password: "wonderland" }
+        - { user: bob, password_hash: "$2y$10$..." }   # bcrypt
+        - { user: carol, password_file: "/etc/goproxy/carol.pw" }
+      realm: "Internal"
+      forward_user_header: X-USER
+  api:
+    token:
+      header: X-TOKEN          # default
+      accept_bearer: true      # Authorization: Bearer <token>, on by default
+      tokens:
+        - { id: ci, value: "s3cr3t" }
+        - { id: deploy, value_env: DEPLOY_TOKEN }
+  sso:
+    forward:
+      url: "http://127.0.0.1:9000/auth"   # 2xx means allowed
+      user_header: X-Auth-User
+      copy_headers: [X-Auth-Groups]
 ```
 
-Unknown keys in the configuration file are reported as warnings at startup and
-then ignored, so a misspelled option says so:
+### Upstreams
 
-```
-WARNING unknown config key ignored: line 6: field proxy_append_paths not found in type proxy.ProxyRule
+```yaml
+upstreams:
+  app:
+    targets:
+      - { url: "http://10.0.0.1:8081", weight: 2 }
+      - { url: "http://10.0.0.2:8081" }
+    policy: round_robin        # least_conn | ip_hash | first_healthy
+    health:
+      passive: { failures: 3, cooldown: 30s }        # on by default
+      active:  { path: /healthz, interval: 10s }     # opt-in
+    retry:
+      attempts: 2
+      on: [connect_error, "503"]
+      budget: 10%              # cap retries at a share of live traffic
+    tls:
+      ca_file: /etc/ssl/certs/internal-ca.pem        # pin a CA
+      insecure_skip_verify: false
 ```
 
-A list of the common validation errors and what causes them is in
-[examples/README.md](examples/README.md#config-errors).
+Only requests that can be replayed are retried — a body that has already been
+read cannot be, so retries apply to requests without one.
+
+### TLS
+
+```yaml
+listeners:
+  https:
+    addr: ":443"
+    tls:
+      min_version: "1.2"       # default; "1.3" for modern-only
+      max_version: ""
+      certs:                   # more than one: the SNI name picks
+        - { cert_file: /etc/ssl/site.crt, key_file: /etc/ssl/site.pem }
+      # or:
+      # acme: { email: ops@example.com, domains: [example.com], cache_dir: /var/lib/goproxy/acme }
+      client_auth:             # mutual TLS
+        mode: require_and_verify
+        ca_file: /etc/ssl/certs/client-ca.pem
+      hsts:                    # opt-in: a wrong max_age is hard to undo
+        enabled: false
+        max_age: 31536000
+```
+
+Certificates are loaded and parsed at startup: one that cannot be used is a
+startup error, not a listener that fails every handshake. `SIGHUP` re-reads
+them, so a renewal does not need a restart.
+
+## Observability
+
+The admin listener is separate from the routed ones, so nothing on it can
+collide with a catch-all rule:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /healthz` | Liveness |
+| `GET /readyz` | Readiness: 503 while starting, while shutting down, or when an upstream has no healthy target |
+| `GET /metrics` | Prometheus |
+| `GET /config` | The resolved config, with secrets redacted |
+| `POST /reload` | Same as `SIGHUP`, and returns the validation error on rejection |
+| `GET /debug/pprof/*` | Opt-in, off by default |
+
+One access-log record is written per request, after the response completes:
+
+```json
+{"time":"2026-08-12T10:00:00.123Z","level":"INFO","msg":"request","id":"01KZVE3YNP0018CC",
+ "client_ip":"1.2.3.4","method":"GET","host":"example.com","path":"/api/v1/users","query":"page=2",
+ "proto":"HTTP/1.1","scheme":"https","status":200,"bytes_in":0,"bytes_out":1732,"duration_ms":12.4,
+ "rule":"api","action":"proxy","upstream":"app","target":"http://10.0.0.1:8081","upstream_ms":11.1,
+ "retries":0,"auth_method":"token","auth_user":"ci","user_agent":"curl/8.4.0"}
+```
+
+The metrics are deliberately small, and every label is a rule name, an upstream
+name, a target or a status code — there are no path, host or client-IP labels,
+which is how a proxy usually blows up a Prometheus server.
 
 ## Signals and exit codes
 
 | Signal | Effect |
 | --- | --- |
-| `SIGINT`, `SIGTERM` | Graceful shutdown: stop accepting, wait for in-flight requests up to `timeouts.shutdown`, then close |
-| `SIGHUP` | Re-read the TLS certificate files (config reload is not implemented yet) |
+| `SIGINT`, `SIGTERM` | Graceful shutdown: stop accepting, wait for in-flight requests up to `defaults.timeouts.shutdown`, then close |
+| `SIGHUP` | Reload the config file and the certificates. A config that does not compile is rejected and the old one keeps serving |
 
 goproxy exits non-zero when the config cannot be loaded, when a listener cannot
 be bound, and when a listener stops on its own. It does not stay alive with a
 dead listener.
+
+## Troubleshooting
+
+The config is compiled at startup, and goproxy prints the path to the offending
+field:
+
+```
+config: config.yaml: rules[2] (api).proxy.upstream: no upstream named "aap" (did you mean "app"?)
+```
+
+`-check` does the same without binding a port, creating a directory or
+contacting anything. `explain` answers "why is my rule not matching":
+
+```
+$ goproxy -config config.yaml explain http://api.example.com/apifoo
+GET http://api.example.com/apifoo
+  SKIP  api                  path "/apifoo" does not match segment /api
+  SKIP  static               path "/apifoo" does not match prefix /site
+  MATCH catch-all            matched
+        respond 404
+```
+
+## Using it as a library
+
+`pkg/proxy` is the front door; the packages under it are importable too and
+documented as such:
+
+```go
+cfg, err := config.ParseFile("config.yaml")
+server, err := proxy.New(cfg)      // compiles; binds nothing
+err = server.Start(ctx)            // binds and serves
+err = server.Reload(newCfg)        // atomic swap, or rejected
+err = server.Shutdown(ctx)         // idempotent
+err = server.Wait()                // why it stopped
+```
+
+| Package | What it holds |
+| --- | --- |
+| `pkg/config` | The schema: parsing, validation, no behaviour |
+| `pkg/route` | Compiling a config into an immutable routing table |
+| `pkg/action` | The four terminal handlers |
+| `pkg/upstream` | Target pools, policies, health checking, retries |
+| `pkg/authn` | Authenticators and the identity they produce |
+| `pkg/middleware` | The request pipeline stages |
+| `pkg/observe` | Logging, the access-log schema, metrics |
+| `pkg/listen` | TLS configuration, certificates, ACME |

@@ -1,347 +1,259 @@
+// Package proxy is goproxy's public API: build a Server from a config, start
+// it, wait for it, reload it, shut it down.
 package proxy
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/rglonek/logger"
 	"golang.org/x/crypto/acme/autocert"
+
+	"goproxy/pkg/config"
+	"goproxy/pkg/listen"
+	"goproxy/pkg/middleware"
+	"goproxy/pkg/observe"
+	"goproxy/pkg/route"
 )
 
-// Server serves a compiled configuration. Build one with New, which binds
-// nothing and reports every problem the config has, then Start it.
+// Server serves a compiled configuration. New compiles and binds nothing;
+// Start binds; Wait reports why serving stopped.
 type Server struct {
-	config  *Config
-	log     *logger.Logger
-	handler http.Handler
+	cfg     atomic.Pointer[config.Config]
+	routes  atomic.Pointer[route.Routes]
+	log     *slog.Logger
+	access  *observe.AccessLogger
+	metrics *observe.Metrics
+	trusted *middleware.TrustedProxies
+
+	certificates *listen.Certificates
+	acme         *autocert.Manager
 
 	httpServer  *http.Server
 	httpsServer *http.Server
+	adminServer *http.Server
 	httpLn      net.Listener
 	httpsLn     net.Listener
+	adminLn     net.Listener
 
-	certManager       *autocert.Manager
-	certificate       atomic.Pointer[tls.Certificate]
-	defaultTransport  *http.Transport
-	insecureTransport *http.Transport
+	reloadMu sync.Mutex
+	stop     chan struct{}
 
 	started      atomic.Bool
+	ready        atomic.Bool
 	shutdownOnce sync.Once
 	doneOnce     sync.Once
+	stopOnce     sync.Once
 	done         chan struct{}
 	wg           sync.WaitGroup
 	errMu        sync.Mutex
 	err          error
-	warnDropOnce sync.Once
 }
 
 // Option customises a Server.
-type Option func(*Server)
+type Option func(*options)
 
-// WithLogger replaces the logger the server builds from the config. The log
-// level of the supplied logger is left alone.
-func WithLogger(l *logger.Logger) Option {
-	return func(s *Server) { s.log = l }
+type options struct {
+	logOutput io.Writer
+	logger    *slog.Logger
+	access    *observe.AccessLogger
+}
+
+// WithLogOutput sends the logs somewhere other than stderr.
+func WithLogOutput(w io.Writer) Option {
+	return func(o *options) { o.logOutput = w }
+}
+
+// WithLogger replaces the process logger.
+func WithLogger(log *slog.Logger) Option {
+	return func(o *options) { o.logger = log }
 }
 
 // New compiles a config into a server. It binds no listeners: everything that
 // can be checked without taking a port - regexes, upstream URLs, static
-// directories, response bodies, certificates - is checked here, so a config
-// that cannot work fails before the process claims :80.
-func New(config *Config, options ...Option) (*Server, error) {
-	if config == nil {
+// directories, response bodies, certificates, secrets - is checked here, so a
+// config that cannot work fails before the process claims :80.
+func New(cfg *config.Config, opts ...Option) (*Server, error) {
+	if cfg == nil {
 		return nil, errors.New("config is required")
 	}
-	if err := config.Compile(); err != nil {
-		return nil, err
-	}
-	s := &Server{
-		config: config,
-		done:   make(chan struct{}),
-	}
-	for _, option := range options {
-		option(s)
-	}
-	if s.log == nil {
-		s.log = logger.NewLogger()
-		s.log.SetLogLevel(logger.LogLevel(config.LogLevel))
-		s.log.MillisecondLogging(true)
-	}
-	for _, warning := range config.Warnings() {
-		s.log.Warn("%s", warning)
+	settings := &options{logOutput: os.Stderr}
+	for _, opt := range opts {
+		opt(settings)
 	}
 
-	s.defaultTransport = s.newTransport(false)
-	s.insecureTransport = s.newTransport(true)
+	build := Version()
+	server := &Server{
+		log:     settings.logger,
+		access:  settings.access,
+		metrics: observe.NewMetrics(build.Version, build.Commit),
+		done:    make(chan struct{}),
+		stop:    make(chan struct{}),
+	}
+	if server.log == nil {
+		server.log = observe.NewLogger(cfg.Log, settings.logOutput)
+	}
+	if server.access == nil {
+		server.access = observe.NewAccessLogger(cfg.Log, settings.logOutput)
+	}
 
-	if config.TLS != nil && config.TLS.LetsEncrypt != nil {
-		s.certManager = &autocert.Manager{
-			Prompt:     autocert.AcceptTOS,
-			HostPolicy: autocert.HostWhitelist(config.TLS.LetsEncrypt.Domains...),
-			Cache:      autocert.DirCache(config.TLS.LetsEncrypt.CacheDir),
-			Email:      config.TLS.LetsEncrypt.Email,
+	var err error
+	if server.trusted, err = middleware.NewTrustedProxies(cfg.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("trusted_proxies: %w", err)
+	}
+	if https := cfg.Listeners.HTTPS; https != nil {
+		if https.TLS.ACME != nil {
+			server.acme = listen.ACME(&https.TLS)
+		} else {
+			if server.certificates, err = listen.NewCertificates(https.TLS.Certs); err != nil {
+				return nil, fmt.Errorf("listeners.https.tls: %w", err)
+			}
 		}
 	}
-	if config.TLS != nil && config.TLS.Certs != nil {
-		// v0.1.0 handed the file names to ServeTLS in a goroutine whose error
-		// was discarded, so a broken certificate left a listening socket that
-		// failed every handshake. Loading here turns that into a startup error.
-		if err := s.ReloadCertificates(); err != nil {
-			return nil, err
-		}
-	}
-	if err := s.prepareRules(); err != nil {
-		s.closeRules()
+
+	routes, err := route.Compile(cfg, route.Deps{Log: server.log, Metrics: server.metrics, Trusted: server.trusted})
+	if err != nil {
 		return nil, err
 	}
-	s.handler = s.buildPipeline()
-	return s, nil
+	server.cfg.Store(cfg)
+	server.routes.Store(routes)
+	server.recordCertExpiry()
+	for _, warning := range cfg.Unreachable() {
+		server.log.Warn("unreachable rule", "detail", warning)
+	}
+	return server, nil
 }
 
 // Run compiles the config and starts serving. It is New followed by Start.
-func Run(config *Config) (*Server, error) {
-	s, err := New(config)
+func Run(cfg *config.Config, opts ...Option) (*Server, error) {
+	server, err := New(cfg, opts...)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.Start(context.Background()); err != nil {
+	if err := server.Start(context.Background()); err != nil {
 		return nil, err
 	}
-	return s, nil
+	return server, nil
 }
 
-// prepareRules builds the runtime state of every rule: reverse proxies, static
-// file roots and canned response bodies.
-func (s *Server) prepareRules() error {
-	for i, rule := range s.config.Rules {
-		switch {
-		case rule.ProxyRule != nil:
-			rule.ProxyRule.proxy = s.newReverseProxy(rule)
-		case rule.ServeRule != nil:
-			handler, err := newServeHandler(rule.ServeRule, s.log)
-			if err != nil {
-				return fmt.Errorf("rules[%d]: %w", i, err)
-			}
-			rule.serveHandler = handler
-		case rule.RespondRule != nil:
-			if rule.RespondRule.RespondBodyFile != "" && !rule.RespondRule.RespondBodyFileReload {
-				// read once at startup rather than re-opening the file on every
-				// request, and fail now if it cannot be read
-				body, err := os.ReadFile(rule.RespondRule.RespondBodyFile)
-				if err != nil {
-					return fmt.Errorf("rules[%d]: respond_rule: respond_body_file: %w", i, err)
-				}
-				rule.respondBody = body
-			} else if rule.RespondRule.RespondBodyFile == "" {
-				rule.respondBody = []byte(rule.RespondRule.RespondBody)
-			}
-		}
-	}
-	return nil
-}
+// Config is the configuration currently being served.
+func (s *Server) Config() *config.Config { return s.cfg.Load() }
 
-func (s *Server) closeRules() {
-	for _, rule := range s.config.Rules {
-		// the handler is closed, not unset: a request that is still in flight
-		// when a shutdown deadline expires then gets a 404 from a closed root
-		// rather than a nil dereference, and there is no write to race with it
-		_ = rule.serveHandler.Close()
-	}
-}
+// Routes is the compiled routing table currently being served.
+func (s *Server) Routes() *route.Routes { return s.routes.Load() }
 
-func (s *Server) newTransport(insecure bool) *http.Transport {
-	// start from the standard transport so that connection pooling, HTTP/2 and
-	// the proxy-from-environment behaviour are kept; v0.1.0 replaced the whole
-	// transport for self-signed targets and lost all of it
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = (&net.Dialer{
-		Timeout:   s.config.upstreamDialTimeout(),
-		KeepAlive: 30 * time.Second,
-	}).DialContext
-	transport.TLSHandshakeTimeout = s.config.upstreamTLSHandshakeTimeout()
-	transport.ResponseHeaderTimeout = s.config.upstreamResponseHeaderTimeout()
-	if insecure {
-		if transport.TLSClientConfig == nil {
-			transport.TLSClientConfig = &tls.Config{}
-		}
-		transport.TLSClientConfig.InsecureSkipVerify = true
-	}
-	return transport
-}
+// Logger is the server's logger.
+func (s *Server) Logger() *slog.Logger { return s.log }
 
-func (s *Server) newReverseProxy(rule *Rule) *httputil.ReverseProxy {
-	target := rule.ProxyRule.proxyURL
-	trusted := s.config.trusted
-	transport := s.defaultTransport
-	if rule.ProxyRule.ProxyTargetAcceptSelfSigned {
-		transport = s.insecureTransport
-	}
-	return &httputil.ReverseProxy{
-		Rewrite: func(request *httputil.ProxyRequest) {
-			// ReverseProxy strips the inbound forwarded headers before calling
-			// Rewrite. Put them back only for a peer we trust to have set them:
-			// from anyone else, a claim about the "original" client is a guess
-			// at best and a forgery at worst.
-			if trusted.trusts(request.In.RemoteAddr) {
-				copyForwardedHeaders(request.Out.Header, request.In.Header)
-			} else {
-				removeForwardedHeaders(request.Out.Header)
-				if hasForwardedHeaders(request.In.Header) {
-					s.warnDroppedForwarded(request.In.RemoteAddr)
-				}
-			}
-			request.SetURL(target)
-			// SetURL points the outbound Host at the target; v0.1.0 forwarded
-			// the Host the client sent, so keep doing that
-			request.Out.Host = request.In.Host
-			request.SetXForwarded()
-			request.Out.Header.Set("X-Real-Ip", trusted.clientIP(request.In))
-			if rule.ProxyRule.ProxyRewriteHostHeader != "" {
-				request.Out.Host = rule.ProxyRule.ProxyRewriteHostHeader
-			}
-		},
-		Transport: transport,
-		ErrorLog:  log.New(logWriter{log: s.log}, "", 0),
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			if errors.Is(err, context.Canceled) {
-				// the client went away mid-request; nothing to report
-				return
-			}
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
-				// the request body hit limits.max_request_body while it was
-				// being forwarded: that is the client's fault, not the
-				// upstream's
-				s.log.Warn("Client=%s Host=%s Path=%s Mod=Proxy Rule=%s Error=request body over the %d byte limit", s.config.trusted.clientIP(r), r.Host, r.URL.Path, rule, tooLarge.Limit)
-				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			s.log.Error("Client=%s Host=%s Path=%s Mod=Proxy Target=%s Rule=%s Error=%v", s.config.trusted.clientIP(r), r.Host, r.URL.Path, rule.ProxyRule.ProxyURL, rule, err)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		},
-	}
-}
+// Metrics is the server's metric set.
+func (s *Server) Metrics() *observe.Metrics { return s.metrics }
 
-func (s *Server) warnDroppedForwarded(peer string) {
-	s.warnDropOnce.Do(func() {
-		s.log.Warn("Dropped inbound X-Forwarded-* headers from %s: the peer is not listed in trusted_proxies. Add it there if goproxy runs behind another proxy.", peer)
+// handler is the per-server pipeline: everything that happens before, and
+// regardless of, which rule matches.
+func (s *Server) handler() http.Handler {
+	routed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.routes.Load().ServeHTTP(w, r)
 	})
+	return middleware.Chain(routed,
+		s.stateMiddleware(),
+		middleware.Recover(s.log, s.metrics),
+		middleware.RequestID(s.trusted),
+		s.trusted.RealIP(func(msg string, args ...any) { s.log.Warn(msg, args...) }),
+		middleware.AccessLog(s.access, s.metrics),
+		middleware.InFlight(s.metrics),
+	)
 }
 
-// logWriter adapts an io.Writer sink (http.Server.ErrorLog) onto the configured
-// logger, so net/http's own errors honour the configured level and sinks.
-type logWriter struct {
-	log *logger.Logger
-}
-
-func (w logWriter) Write(p []byte) (int, error) {
-	w.log.Error("%s", strings.TrimRight(string(p), "\n"))
-	return len(p), nil
-}
-
-// ReloadCertificates re-reads the certificate and key named in the config.
-// Certificates are served through GetCertificate, so a renewed certificate is
-// picked up without dropping connections.
-func (s *Server) ReloadCertificates() error {
-	if s.config.TLS == nil || s.config.TLS.Certs == nil {
-		return nil
-	}
-	certificate, err := tls.LoadX509KeyPair(s.config.TLS.Certs.CertFile, s.config.TLS.Certs.KeyFile)
-	if err != nil {
-		return fmt.Errorf("tls: certs: %w", err)
-	}
-	s.certificate.Store(&certificate)
-	return nil
-}
-
-func (s *Server) tlsConfig() *tls.Config {
-	minVersion, maxVersion := s.config.tlsVersions()
-	config := &tls.Config{
-		MinVersion: minVersion,
-		MaxVersion: maxVersion,
-	}
-	if s.certManager != nil {
-		config.GetCertificate = s.certManager.GetCertificate
-		return config
-	}
-	config.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-		certificate := s.certificate.Load()
-		if certificate == nil {
-			return nil, errors.New("no certificate loaded")
-		}
-		return certificate, nil
-	}
-	return config
-}
-
-func (s *Server) newHTTPServer(addr string, handler http.Handler) *http.Server {
-	return &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: s.config.readHeaderTimeout(),
-		ReadTimeout:       s.config.readTimeout(),
-		WriteTimeout:      s.config.writeTimeout(),
-		IdleTimeout:       s.config.idleTimeout(),
-		MaxHeaderBytes:    s.config.maxHeaderBytes(),
-		ErrorLog:          log.New(logWriter{log: s.log}, "", 0),
+// stateMiddleware attaches the per-request state the rest of the pipeline
+// fills in, and wraps the writer so that the status and size can be recorded.
+func (s *Server) stateMiddleware() middleware.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			request, _ := middleware.NewState(r)
+			next.ServeHTTP(middleware.NewRecorder(w), request)
+		})
 	}
 }
 
-// Start binds the listeners and begins serving. It returns an error if any
+// Start binds the listeners and begins serving. It returns an error if a
 // listener cannot be bound; a listener that fails later is reported through
 // Wait. Cancelling ctx starts a graceful shutdown.
 func (s *Server) Start(ctx context.Context) error {
 	if !s.started.CompareAndSwap(false, true) {
 		return errors.New("server already started")
 	}
-	s.log.Info("Starting proxy server...")
+	cfg := s.cfg.Load()
+	s.log.Info("starting", "version", Version().Version, "rules", len(cfg.Rules))
 
-	if s.certManager != nil {
+	if s.acme != nil {
 		// created here rather than during validation: checking a config must
 		// not have side effects
-		if err := os.MkdirAll(s.config.TLS.LetsEncrypt.CacheDir, 0o755); err != nil {
-			return s.failedToStart(fmt.Errorf("tls: lets_encrypt: failed to create cache_dir: %w", err))
+		if err := os.MkdirAll(cfg.Listeners.HTTPS.TLS.ACME.CacheDir, 0o700); err != nil {
+			return s.failedToStart(fmt.Errorf("listeners.https.tls.acme.cache_dir: %w", err))
 		}
 	}
 
+	handler := s.handler()
 	var listenConfig net.ListenConfig
-	if s.config.ListenAddr != "" {
-		ln, err := listenConfig.Listen(ctx, "tcp", s.config.ListenAddr)
+
+	if cfg.Listeners.HTTP != nil {
+		ln, err := listenConfig.Listen(ctx, "tcp", cfg.Listeners.HTTP.Addr)
 		if err != nil {
 			return s.failedToStart(err)
 		}
 		s.httpLn = ln
-		s.httpServer = s.newHTTPServer(s.config.ListenAddr, s.httpHandler())
+		s.httpServer = s.newHTTPServer(cfg, s.httpHandler(cfg, handler))
 	}
-	if s.config.TLS != nil {
-		ln, err := listenConfig.Listen(ctx, "tcp", s.config.TLS.ListenAddr)
+	if cfg.Listeners.HTTPS != nil {
+		ln, err := listenConfig.Listen(ctx, "tcp", cfg.Listeners.HTTPS.Addr)
 		if err != nil {
 			s.closeListeners()
 			return s.failedToStart(err)
 		}
 		s.httpsLn = ln
-		s.httpsServer = s.newHTTPServer(s.config.TLS.ListenAddr, s.handler)
-		s.httpsServer.TLSConfig = s.tlsConfig()
+		httpsHandler := handler
+		if hsts := listen.HSTS(cfg.Listeners.HTTPS.TLS.HSTS); hsts != nil {
+			httpsHandler = hsts(handler)
+		}
+		s.httpsServer = s.newHTTPServer(cfg, httpsHandler)
+		tlsConfig, err := listen.TLSConfig(cfg.Listeners.HTTPS.TLS, s.certificates, s.acme, s.metrics)
+		if err != nil {
+			s.closeListeners()
+			return s.failedToStart(fmt.Errorf("listeners.https.tls: %w", err))
+		}
+		s.httpsServer.TLSConfig = tlsConfig
 	}
+	if cfg.Admin != nil {
+		ln, err := listenConfig.Listen(ctx, "tcp", cfg.Admin.Addr)
+		if err != nil {
+			s.closeListeners()
+			return s.failedToStart(fmt.Errorf("admin: %w", err))
+		}
+		s.adminLn = ln
+		s.adminServer = s.newHTTPServer(cfg, s.adminHandler(cfg.Admin))
+	}
+
+	s.routes.Load().Start(s.stop)
 
 	if s.httpServer != nil {
 		s.serve("http", s.httpServer, s.httpLn, false)
-		s.log.Info("Listening for HTTP on %s", s.httpLn.Addr())
+		s.log.Info("listening", "proto", "http", "addr", s.httpLn.Addr().String())
 	}
 	if s.httpsServer != nil {
 		s.serve("https", s.httpsServer, s.httpsLn, true)
-		s.log.Info("Listening for HTTPS on %s", s.httpsLn.Addr())
+		s.log.Info("listening", "proto", "https", "addr", s.httpsLn.Addr().String())
+	}
+	if s.adminServer != nil {
+		s.serve("admin", s.adminServer, s.adminLn, false)
+		s.log.Info("listening", "proto", "admin", "addr", s.adminLn.Addr().String())
 	}
 
 	go func() {
@@ -354,32 +266,49 @@ func (s *Server) Start(ctx context.Context) error {
 		go func() {
 			select {
 			case <-ctx.Done():
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), s.config.ShutdownTimeout())
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout())
 				defer cancel()
 				_ = s.Shutdown(shutdownCtx)
 			case <-s.done:
 			}
 		}()
 	}
-
-	s.log.Info("Proxy server started")
+	s.ready.Store(true)
 	return nil
 }
 
-// httpHandler is what the plain HTTP listener serves: the rules, or - when TLS
-// is configured - a redirect to https, with the ACME http-01 challenge handled
-// in front of it.
-func (s *Server) httpHandler() http.Handler {
-	if s.config.TLS == nil {
-		return s.handler
+// httpHandler is what the plain http listener serves: the rules, or a redirect
+// to https, with the ACME challenge handled in front of it.
+func (s *Server) httpHandler(cfg *config.Config, routed http.Handler) http.Handler {
+	handler := routed
+	redirect := cfg.Listeners.HTTPS != nil
+	if cfg.Listeners.HTTP.RedirectToHTTPS != nil {
+		redirect = *cfg.Listeners.HTTP.RedirectToHTTPS
 	}
-	redirector := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://"+r.Host+r.RequestURI, http.StatusMovedPermanently)
-	})
-	if s.certManager != nil {
-		return s.certManager.HTTPHandler(redirector)
+	if redirect {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusMovedPermanently)
+		})
 	}
-	return redirector
+	if s.acme != nil {
+		// mounted explicitly rather than wrapping everything, so the
+		// interaction with the redirect is visible
+		return s.acme.HTTPHandler(handler)
+	}
+	return handler
+}
+
+func (s *Server) newHTTPServer(cfg *config.Config, handler http.Handler) *http.Server {
+	timeouts := cfg.Defaults.Timeouts
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: timeouts.ReadHeader.Or(config.DefaultReadHeaderTimeout),
+		ReadTimeout:       timeouts.Read.Or(config.DefaultReadTimeout),
+		WriteTimeout:      timeouts.Write.Or(config.DefaultWriteTimeout),
+		IdleTimeout:       timeouts.Idle.Or(config.DefaultIdleTimeout),
+		MaxHeaderBytes:    int(cfg.Defaults.Limits.MaxHeaderBytes.Or(config.DefaultMaxHeaderBytes)),
+		ErrorLog:          slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
+	}
 }
 
 func (s *Server) serve(name string, server *http.Server, ln net.Listener, useTLS bool) {
@@ -388,7 +317,7 @@ func (s *Server) serve(name string, server *http.Server, ln net.Listener, useTLS
 		defer s.wg.Done()
 		var err error
 		if useTLS {
-			// the certificate is already loaded and served through
+			// the certificates are already loaded and served through
 			// TLSConfig.GetCertificate
 			err = server.ServeTLS(ln, "", "")
 		} else {
@@ -397,23 +326,134 @@ func (s *Server) serve(name string, server *http.Server, ln net.Listener, useTLS
 		if err == nil || errors.Is(err, http.ErrServerClosed) {
 			return
 		}
-		s.log.Error("%s listener stopped: %v", name, err)
+		s.log.Error("listener stopped", "listener", name, "error", err)
 		s.setErr(fmt.Errorf("%s listener: %w", name, err))
-		if s.config.OnListenerError == OnListenerErrorContinue {
+		if s.cfg.Load().OnListenerError == config.OnListenerErrorContinue {
 			s.log.Warn("on_listener_error=continue: the remaining listeners keep serving")
 			return
 		}
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), s.config.ShutdownTimeout())
+			ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout())
 			defer cancel()
 			_ = s.Shutdown(ctx)
 		}()
 	}()
 }
 
-// failedToStart records a startup failure and releases anyone blocked in Wait,
-// so a caller that starts the server in one goroutine and waits in another does
-// not hang on a server that never came up.
+func (s *Server) shutdownTimeout() time.Duration {
+	return s.cfg.Load().Defaults.Timeouts.Shutdown.Or(config.DefaultShutdownTimeout)
+}
+
+// Reload compiles a new config and swaps it in. The request path reads the
+// table through a single atomic load, so there is no lock and no torn state; a
+// request that started under the old table finishes under it. A config that
+// does not compile is rejected and the old one keeps serving.
+func (s *Server) Reload(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("config is required")
+	}
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	current := s.cfg.Load()
+	if changed := listenerChanges(current, cfg); len(changed) > 0 {
+		s.metrics.ConfigReloads.Inc("rejected")
+		return fmt.Errorf("%s changed: a restart is required to apply that", changed[0])
+	}
+
+	if s.certificates != nil {
+		if err := s.certificates.Reload(); err != nil {
+			s.metrics.ConfigReloads.Inc("rejected")
+			return fmt.Errorf("listeners.https.tls: %w", err)
+		}
+	}
+	routes, err := route.Compile(cfg, route.Deps{Log: s.log, Metrics: s.metrics, Trusted: s.trusted})
+	if err != nil {
+		s.metrics.ConfigReloads.Inc("rejected")
+		return err
+	}
+	routes.Start(s.stop)
+
+	old := s.routes.Swap(routes)
+	s.cfg.Store(cfg)
+	s.recordCertExpiry()
+	s.metrics.ConfigReloads.Inc("applied")
+	s.metrics.LastReloadTime.Set(float64(time.Now().Unix()))
+	for _, warning := range cfg.Unreachable() {
+		s.log.Warn("unreachable rule", "detail", warning)
+	}
+	s.log.Info("config reloaded", "rules", len(cfg.Rules))
+
+	// the old table's resources are released once the requests that were using
+	// it have drained
+	go func() {
+		time.Sleep(s.shutdownTimeout())
+		old.Close()
+	}()
+	return nil
+}
+
+// ReloadFile re-reads the config from the file it was loaded from.
+func (s *Server) ReloadFile() error {
+	source := s.cfg.Load().Source
+	if source == "" {
+		return errors.New("this server was not loaded from a file")
+	}
+	cfg, err := config.ParseFile(source)
+	if err != nil {
+		s.metrics.ConfigReloads.Inc("rejected")
+		return err
+	}
+	return s.Reload(cfg)
+}
+
+// listenerChanges reports config changes that cannot be applied by swapping
+// the routing table, so that they are reported rather than silently ignored.
+func listenerChanges(old, new *config.Config) []string {
+	var changed []string
+	if addrOf(old.Listeners.HTTP) != addrOf(new.Listeners.HTTP) {
+		changed = append(changed, "listeners.http.addr")
+	}
+	if httpsAddr(old) != httpsAddr(new) {
+		changed = append(changed, "listeners.https.addr")
+	}
+	if adminAddr(old) != adminAddr(new) {
+		changed = append(changed, "admin.addr")
+	}
+	return changed
+}
+
+func addrOf(l *config.HTTPListener) string {
+	if l == nil {
+		return ""
+	}
+	return l.Addr
+}
+
+func httpsAddr(c *config.Config) string {
+	if c.Listeners.HTTPS == nil {
+		return ""
+	}
+	return c.Listeners.HTTPS.Addr
+}
+
+func adminAddr(c *config.Config) string {
+	if c.Admin == nil {
+		return ""
+	}
+	return c.Admin.Addr
+}
+
+func (s *Server) recordCertExpiry() {
+	if s.certificates == nil {
+		return
+	}
+	for subject, expiry := range s.certificates.Expiry() {
+		s.metrics.CertExpiry.Set(float64(expiry.Unix()), subject)
+	}
+}
+
+// failedToStart records a startup failure and releases anyone blocked in Wait.
 func (s *Server) failedToStart(err error) error {
 	s.setErr(err)
 	s.cleanup()
@@ -434,59 +474,57 @@ func (s *Server) getErr() error {
 }
 
 func (s *Server) closeListeners() {
-	if s.httpLn != nil {
-		s.httpLn.Close()
-	}
-	if s.httpsLn != nil {
-		s.httpsLn.Close()
+	for _, ln := range []net.Listener{s.httpLn, s.httpsLn, s.adminLn} {
+		if ln != nil {
+			_ = ln.Close()
+		}
 	}
 }
 
 func (s *Server) cleanup() {
-	s.closeRules()
-	s.defaultTransport.CloseIdleConnections()
-	s.insecureTransport.CloseIdleConnections()
+	s.stopOnce.Do(func() { close(s.stop) })
+	s.routes.Load().Close()
 }
 
 func (s *Server) finish() {
 	s.doneOnce.Do(func() { close(s.done) })
 }
 
-// HTTPAddr is the address the plain HTTP listener is bound to, or "" if there
+// HTTPAddr is the address the plain http listener is bound to, or "" if there
 // is none. It is the resolved address, so it is useful when the config asked
 // for port 0.
-func (s *Server) HTTPAddr() string {
-	if s.httpLn == nil {
-		return ""
-	}
-	return s.httpLn.Addr().String()
-}
+func (s *Server) HTTPAddr() string { return addrString(s.httpLn) }
 
-// HTTPSAddr is the address the TLS listener is bound to, or "" if there is none.
-func (s *Server) HTTPSAddr() string {
-	if s.httpsLn == nil {
+// HTTPSAddr is the address the https listener is bound to, or "".
+func (s *Server) HTTPSAddr() string { return addrString(s.httpsLn) }
+
+// AdminAddr is the address the admin listener is bound to, or "".
+func (s *Server) AdminAddr() string { return addrString(s.adminLn) }
+
+func addrString(ln net.Listener) string {
+	if ln == nil {
 		return ""
 	}
-	return s.httpsLn.Addr().String()
+	return ln.Addr().String()
 }
 
 // Shutdown stops the server gracefully: it stops accepting, waits for in-flight
 // requests until ctx expires, then force-closes what is left. It is safe to
 // call more than once and from several goroutines - the second call is a no-op
-// rather than a panic. It must not race with Start: shut down a server that has
-// started.
+// rather than a panic. It must not race with Start.
 func (s *Server) Shutdown(ctx context.Context) error {
 	var err error
 	s.shutdownOnce.Do(func() {
-		s.log.Info("Shutting down proxy server")
+		s.ready.Store(false)
+		s.log.Info("shutting down")
 		err = s.shutdown(ctx)
 		if err != nil {
-			s.log.Error("Proxy server shut down with errors: %v", err)
+			s.log.Error("shutdown finished with errors", "error", err)
 		} else {
-			s.log.Info("Proxy server shut down")
+			s.log.Info("shutdown complete")
 		}
 		if !s.started.Load() {
-			// nothing is serving, so nothing will release Wait
+			// nothing is serving, so nothing else will release Wait
 			s.cleanup()
 			s.finish()
 		}
@@ -496,7 +534,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) shutdown(ctx context.Context) error {
 	var errs error
-	for _, server := range []*http.Server{s.httpServer, s.httpsServer} {
+	for _, server := range []*http.Server{s.httpServer, s.httpsServer, s.adminServer} {
 		if server == nil {
 			continue
 		}

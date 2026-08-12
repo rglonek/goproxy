@@ -62,8 +62,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test ./pkg/proxy/ -run FuzzParseConfig -fuzz FuzzParseConfig -fuzztime 60s
-      - run: go test ./pkg/proxy/ -run FuzzMatch -fuzz FuzzMatch -fuzztime 60s
+      - run: go test ./pkg/config/ -run FuzzParse -fuzz FuzzParse -fuzztime 60s
+      - run: go test ./pkg/route/ -run FuzzMatch -fuzz FuzzMatch -fuzztime 60s
 
   vuln:
     name: govulncheck
