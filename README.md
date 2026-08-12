@@ -324,6 +324,18 @@ GET http://api.example.com/apifoo
         respond 404
 ```
 
+## Building
+
+Go 1.25 or newer. `go.mod` pins the toolchain to a patched release, so a build
+on an older Go fetches that toolchain rather than linking a stdlib with known
+advisories in `crypto/tls`, `crypto/x509` and `net/http`:
+
+```bash
+go build ./cli          # or ./build.sh for the release artefacts
+go test ./... -race
+govulncheck ./...       # expected to report nothing affecting the code
+```
+
 ## Using it as a library
 
 `pkg/proxy` is the front door; the packages under it are importable too and

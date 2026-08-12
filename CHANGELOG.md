@@ -92,6 +92,17 @@ half-understood.
   than silently ignored.
 * Certificates are re-read on reload.
 
+### Supply chain
+
+* Go 1.25 is the minimum, and go.mod pins `toolchain go1.25.12`: every stdlib
+  finding govulncheck reports is "fixed in go1.25.x", so the floor belongs in
+  the repo rather than in whichever Go the build machine happens to have.
+* `golang.org/x/crypto`, `golang.org/x/net` and `golang.org/x/text` updated to
+  current releases, clearing advisories in `x/net/idna` and `x/text/unicode/norm`
+  reachable through ACME host matching.
+* `govulncheck ./...` reports nothing affecting the code, and CI runs it on
+  every push and weekly.
+
 ### Kept from 0.3.0
 
 Everything phases 1 and 2 fixed is still fixed: timeouts and size limits,
