@@ -27,8 +27,13 @@ func (c *Config) Validate() error {
 	if c.Listeners.HTTP == nil && c.Listeners.HTTPS == nil {
 		return fmt.Errorf("listeners: at least one of http and https is required")
 	}
-	if c.Listeners.HTTP != nil && c.Listeners.HTTP.Addr == "" {
-		return fmt.Errorf("listeners.http.addr: is required")
+	if c.Listeners.HTTP != nil {
+		if c.Listeners.HTTP.Addr == "" {
+			return fmt.Errorf("listeners.http.addr: is required")
+		}
+		if c.Listeners.HTTPS == nil && c.Listeners.HTTP.RedirectToHTTPS != nil && *c.Listeners.HTTP.RedirectToHTTPS {
+			return fmt.Errorf("listeners.http.redirect_to_https: there is no https listener to redirect to")
+		}
 	}
 	if c.Listeners.HTTPS != nil {
 		if c.Listeners.HTTPS.Addr == "" {

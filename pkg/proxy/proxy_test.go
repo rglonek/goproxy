@@ -831,3 +831,66 @@ rules:
 	// bob has his own bucket: without the ordering fix he would share alice's
 	equal(t, "bob first", call("bob-token"), http.StatusOK)
 }
+
+// trusted_proxies and log.level are server-level rather than part of the
+// routing table, so a reload has to apply them deliberately; without that a
+// change would be accepted and then quietly ignored.
+func TestReloadAppliesServerLevelSettings(t *testing.T) {
+	backend := newEchoBackend(t, "app")
+	dir := t.TempDir()
+	before := fmt.Sprintf(`
+version: 2
+log: { level: info }
+listeners:
+  http: { addr: "127.0.0.1:0" }
+rules:
+  - name: app
+    proxy: { url: %q }
+`, backend.URL)
+	path := writeFile(t, dir, "config.yaml", before)
+	server := startTestServer(t, parseFile(t, path))
+
+	req := request(t, http.MethodGet, server.url("/x"), nil)
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	_, body := do(t, req)
+	equal(t, "before reload", decodeEcho(t, body).Header.Get("X-Real-Ip"), "127.0.0.1")
+
+	writeFileAt(t, path, strings.Replace(before,
+		"log: { level: info }",
+		"log: { level: detail }\ntrusted_proxies: [\"127.0.0.0/8\"]", 1))
+	if err := server.ReloadFile(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	req = request(t, http.MethodGet, server.url("/x"), nil)
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	_, body = do(t, req)
+	equal(t, "after reload", decodeEcho(t, body).Header.Get("X-Real-Ip"), "1.2.3.4")
+	// the level change took effect too: detail logs which rule matched
+	contains(t, server.log(), "rule matched")
+}
+
+// Settings that are baked into the logger or the listeners at startup cannot be
+// swapped, so a reload says so rather than leaving the operator to find out.
+func TestReloadWarnsAboutSettingsItCannotApply(t *testing.T) {
+	dir := t.TempDir()
+	before := `
+version: 2
+listeners:
+  http: { addr: "127.0.0.1:0" }
+defaults:
+  timeouts: { read: 30s }
+rules:
+  - name: app
+    respond: { status: 200, body: ok }
+`
+	path := writeFile(t, dir, "config.yaml", before)
+	server := startTestServer(t, parseFile(t, path))
+
+	writeFileAt(t, path, strings.Replace(before, "read: 30s", "read: 5s", 1))
+	if err := server.ReloadFile(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	contains(t, server.log(), "needs a restart")
+	contains(t, server.log(), "defaults.timeouts")
+}

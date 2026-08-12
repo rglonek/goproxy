@@ -14,6 +14,13 @@ import (
 // NewAccessLogger), because "request logs but not debug noise" and "warnings
 // but no per-request lines" are both reasonable.
 func NewLogger(cfg config.Log, out io.Writer) *slog.Logger {
+	logger, _ := NewLevelledLogger(cfg, out)
+	return logger
+}
+
+// NewLevelledLogger also returns the level, so that a reload can change it
+// without rebuilding the pipeline the handler is wired into.
+func NewLevelledLogger(cfg config.Log, out io.Writer) (*slog.Logger, *slog.LevelVar) {
 	if out == nil {
 		out = os.Stderr
 	}
@@ -21,14 +28,16 @@ func NewLogger(cfg config.Log, out io.Writer) *slog.Logger {
 	if level == 0 {
 		level = config.LevelInfo
 	}
+	variable := &slog.LevelVar{}
+	variable.Set(level.Slog())
 	options := &slog.HandlerOptions{
-		Level:       level.Slog(),
+		Level:       variable,
 		ReplaceAttr: replaceLevel,
 	}
 	if resolveFormat(cfg.Format, out) == config.FormatJSON {
-		return slog.New(slog.NewJSONHandler(out, options))
+		return slog.New(slog.NewJSONHandler(out, options)), variable
 	}
-	return slog.New(slog.NewTextHandler(out, options))
+	return slog.New(slog.NewTextHandler(out, options)), variable
 }
 
 // resolveFormat defaults to human-readable output on a terminal and JSON

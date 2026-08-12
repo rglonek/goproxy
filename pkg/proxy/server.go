@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,7 @@ type Server struct {
 
 	certificates *listen.Certificates
 	acme         *autocert.Manager
+	logLevel     *slog.LevelVar
 
 	httpServer  *http.Server
 	httpsServer *http.Server
@@ -99,7 +101,7 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 		stop:    make(chan struct{}),
 	}
 	if server.log == nil {
-		server.log = observe.NewLogger(cfg.Log, settings.logOutput)
+		server.log, server.logLevel = observe.NewLevelledLogger(cfg.Log, settings.logOutput)
 	}
 	if server.access == nil {
 		server.access = observe.NewAccessLogger(cfg.Log, settings.logOutput)
@@ -367,12 +369,25 @@ func (s *Server) Reload(cfg *config.Config) error {
 			return fmt.Errorf("listeners.https.tls: %w", err)
 		}
 	}
+	// trusted_proxies is server-level rather than part of the routing table, so
+	// it is swapped here; without this a change to it would be accepted and
+	// then quietly ignored
+	if err := s.trusted.Set(cfg.TrustedProxies); err != nil {
+		s.metrics.ConfigReloads.Inc("rejected")
+		return fmt.Errorf("trusted_proxies: %w", err)
+	}
 	routes, err := route.Compile(cfg, route.Deps{Log: s.log, Metrics: s.metrics, Trusted: s.trusted})
 	if err != nil {
 		s.metrics.ConfigReloads.Inc("rejected")
 		return err
 	}
 	routes.Start(s.stop)
+	if s.logLevel != nil && cfg.Log.Level != current.Log.Level {
+		s.logLevel.Set(cfg.Log.Level.Slog())
+	}
+	for _, ignored := range staticSettings(current, cfg) {
+		s.log.Warn("config change needs a restart to take effect", "setting", ignored)
+	}
 
 	old := s.routes.Swap(routes)
 	s.cfg.Store(cfg)
@@ -421,6 +436,35 @@ func listenerChanges(old, new *config.Config) []string {
 		changed = append(changed, "admin.addr")
 	}
 	return changed
+}
+
+// staticSettings are the changes a reload applies to nothing, because they are
+// baked into the logger or the listeners at startup. They are reported rather
+// than left for the operator to discover.
+func staticSettings(old, updated *config.Config) []string {
+	var ignored []string
+	if old.Log.Format != updated.Log.Format {
+		ignored = append(ignored, "log.format")
+	}
+	if !slices.Equal(old.Log.Access.ExcludePaths, updated.Log.Access.ExcludePaths) ||
+		!slices.Equal(old.Log.Access.RedactQueryParams, updated.Log.Access.RedactQueryParams) ||
+		!equalBool(old.Log.Access.Enabled, updated.Log.Access.Enabled) {
+		ignored = append(ignored, "log.access")
+	}
+	if old.Defaults.Timeouts != updated.Defaults.Timeouts {
+		ignored = append(ignored, "defaults.timeouts")
+	}
+	if old.Defaults.Limits.MaxHeaderBytes.Or(0) != updated.Defaults.Limits.MaxHeaderBytes.Or(0) {
+		ignored = append(ignored, "defaults.limits.max_header_bytes")
+	}
+	return ignored
+}
+
+func equalBool(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func addrOf(l *config.HTTPListener) string {

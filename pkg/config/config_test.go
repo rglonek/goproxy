@@ -45,7 +45,7 @@ log:
 listeners:
   http:
     addr: ":80"
-    redirect_to_https: true
+    redirect_to_https: false
 admin:
   addr: "127.0.0.1:9090"
 defaults:
@@ -159,6 +159,13 @@ version: 2
 rules:
   - respond: { status: 200, body: ok }
 `, "listeners: at least one"},
+		{"redirect to a listener that does not exist", `
+version: 2
+listeners:
+  http: { addr: ":8080", redirect_to_https: true }
+rules:
+  - respond: { status: 200, body: ok }
+`, "no https listener to redirect to"},
 		{"no rules", `
 version: 2
 listeners:

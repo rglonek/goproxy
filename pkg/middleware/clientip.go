@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"goproxy/pkg/config"
 )
@@ -25,25 +26,44 @@ var forwardedHeaders = []string{
 // Empty by default: from anyone else, a claim about the "original" client is a
 // guess at best and a forgery at worst.
 type TrustedProxies struct {
-	nets []netip.Prefix
+	// nets is swapped rather than mutated, so a reload can change the list
+	// while requests are being served
+	nets atomic.Pointer[[]netip.Prefix]
 	warn sync.Once
 }
 
 // NewTrustedProxies parses the trusted_proxies list.
 func NewTrustedProxies(cidrs []string) (*TrustedProxies, error) {
 	trusted := &TrustedProxies{}
-	for _, cidr := range cidrs {
-		prefix, err := config.ParsePrefix(cidr)
-		if err != nil {
-			return nil, err
-		}
-		trusted.nets = append(trusted.nets, prefix)
+	if err := trusted.Set(cidrs); err != nil {
+		return nil, err
 	}
 	return trusted, nil
 }
 
+// Set replaces the list, so that a reload applies a change to trusted_proxies
+// instead of silently keeping the list the process started with.
+func (t *TrustedProxies) Set(cidrs []string) error {
+	nets := make([]netip.Prefix, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		prefix, err := config.ParsePrefix(cidr)
+		if err != nil {
+			return err
+		}
+		nets = append(nets, prefix)
+	}
+	t.nets.Store(&nets)
+	return nil
+}
+
 // Empty reports whether no peer is trusted.
-func (t *TrustedProxies) Empty() bool { return t == nil || len(t.nets) == 0 }
+func (t *TrustedProxies) Empty() bool {
+	if t == nil {
+		return true
+	}
+	nets := t.nets.Load()
+	return nets == nil || len(*nets) == 0
+}
 
 // Trusts reports whether an address literal is a proxy whose forwarded headers
 // should be believed.
@@ -60,7 +80,7 @@ func (t *TrustedProxies) trustsIP(ip netip.Addr) bool {
 		return false
 	}
 	ip = ip.Unmap()
-	for _, prefix := range t.nets {
+	for _, prefix := range *t.nets.Load() {
 		if prefix.Contains(ip) {
 			return true
 		}
