@@ -331,9 +331,31 @@ on an older Go fetches that toolchain rather than linking a stdlib with known
 advisories in `crypto/tls`, `crypto/x509` and `net/http`:
 
 ```bash
-go build ./cli          # or ./build.sh for the release artefacts
+go build ./cli          # or ./build.sh for artefacts for every platform
 go test ./... -race
 govulncheck ./...       # expected to report nothing affecting the code
+```
+
+## Releasing
+
+The `VERSION` file at the top of the repository is the single source of truth.
+It is embedded in the binary, so `goproxy -version` and the release tag cannot
+drift apart, and there is no build flag to forget.
+
+1. Bump `VERSION` (e.g. `1.1.0`) and merge to `main`.
+2. Run the **Release** workflow from the Actions tab, typing the same version
+   into the prompt. It refuses to run if that does not match the file, or if the
+   tag already exists.
+
+The workflow builds `linux/amd64` and `linux/arm64` on one runner with
+`CGO_ENABLED=0`, packages each as `goproxy-<version>-linux-<arch>.tar.gz`
+containing the binary, `LICENSE` and `README.md`, checks that the binary reports
+the version being released, and creates the GitHub release `v<version>` with the
+tarballs and a `checksums.txt`.
+
+```bash
+tar -xzf goproxy-1.0.0-linux-amd64.tar.gz
+./goproxy -version      # goproxy version 1.0.0, commit abc1234, built ..., go1.25.12
 ```
 
 ## Using it as a library

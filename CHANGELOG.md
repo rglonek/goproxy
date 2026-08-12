@@ -103,6 +103,17 @@ half-understood.
 * `govulncheck ./...` reports nothing affecting the code, and CI runs it on
   every push and weekly.
 
+### Release
+
+* `VERSION` at the top of the repository names the release and is embedded in
+  the binary, so `goproxy -version` reports what was released without a build
+  flag anyone has to remember.
+* A manually-triggered **Release** workflow builds `linux/amd64` and
+  `linux/arm64` on one runner with `CGO_ENABLED=0`, packages each as a tarball
+  with `LICENSE` and `README.md`, and publishes them with a `checksums.txt`. It
+  confirms the version typed at dispatch against the file, and refuses to
+  release over an existing tag.
+
 ### Kept from 0.3.0
 
 Everything phases 1 and 2 fixed is still fixed: timeouts and size limits,

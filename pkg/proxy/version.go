@@ -4,16 +4,16 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+
+	"goproxy"
 )
 
-// Build information. version is baked in at build time with
+// The version comes from the VERSION file at the top of the repository, which
+// is embedded at compile time - there is no build flag to forget. commit and
+// date are read from the embedded VCS stamp, or can be set explicitly with
 //
-//	-ldflags "-X goproxy/pkg/proxy.version=1.2.3"
-//
-// commit and date are read from the embedded VCS stamp when they are not set
-// explicitly, so a `go build` of a clean checkout still reports them.
+//	-ldflags "-X goproxy/pkg/proxy.commit=abc1234"
 var (
-	version   = "1.0.0-dev"
 	commit    = ""
 	buildDate = ""
 )
@@ -29,7 +29,7 @@ type BuildInfo struct {
 // Version returns the version of the goproxy binary.
 func Version() BuildInfo {
 	info := BuildInfo{
-		Version:   version,
+		Version:   goproxy.Version,
 		Commit:    commit,
 		BuildDate: buildDate,
 		GoVersion: runtime.Version(),
