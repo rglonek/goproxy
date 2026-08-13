@@ -1,8 +1,15 @@
 # goproxy "next" — redesign proposal
 
-Status: **proposal / request for comment**. Nothing here is implemented; no
-behaviour of the shipping `v0.1.0` code changes as a result of merging this
-directory.
+Status: **implemented**. All five phases of [the roadmap](08-roadmap.md) have
+landed; [CHANGELOG.md](../../../CHANGELOG.md) records what shipped in which
+release, and the maintainer's answers to
+[the open questions](09-open-questions.md) are recorded there.
+
+The findings in [01-current-state.md](01-current-state.md) describe `v0.1.0` and
+are left as written, so the reasoning behind each change stays readable. The
+architecture in [03-architecture.md](03-architecture.md) is what the code now
+does, with one deliberate difference: packages live under `pkg/` rather than
+`internal/`, because Q2 was answered "keep things importable".
 
 ## Why
 

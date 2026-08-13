@@ -1,0 +1,25 @@
+# Automatic certificates from Let's Encrypt.
+#
+# The http-01 challenge is answered on the plain HTTP listener, which therefore
+# has to be reachable on port 80. The challenge handler is mounted in front of
+# the redirect, so the two do not fight over the same requests.
+
+version: 2
+
+listeners:
+  http:
+    addr: ":80"
+  https:
+    addr: ":443"
+    tls:
+      acme:
+        email: "admin@example.com"
+        domains:
+          - "example.com"
+          - "www.example.com"
+        cache_dir: "/var/lib/goproxy/letsencrypt"
+
+rules:
+  - name: app
+    proxy:
+      url: "http://127.0.0.1:8081"

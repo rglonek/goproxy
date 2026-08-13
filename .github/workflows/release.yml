@@ -1,0 +1,101 @@
+name: Release
+
+# Run this by hand after merging to main. The VERSION file is the source of
+# truth: it names the tag, and it is embedded in the binary, so what `goproxy
+# -version` prints and what the release is called cannot drift apart.
+on:
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: "Mark the release as a pre-release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and release
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Read the version
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(tr -d ' \t\r\n' < VERSION)
+          if [ -z "$version" ]; then
+            echo "::error::VERSION is empty"
+            exit 1
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::VERSION is $version, which is not a version like 1.2.3 or 1.2.3-rc1"
+            exit 1
+          fi
+          echo "releasing v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to overwrite an existing release
+        run: |
+          set -euo pipefail
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::${{ steps.version.outputs.tag }} has already been released; bump VERSION"
+            exit 1
+          fi
+
+      - name: Build and package
+        run: |
+          set -euo pipefail
+          version=${{ steps.version.outputs.version }}
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            stage="build/linux-$arch"
+            mkdir -p "$stage"
+            GOOS=linux GOARCH="$arch" go build \
+              -trimpath \
+              -ldflags "-s -w -X goproxy/pkg/proxy.commit=${GITHUB_SHA::7} -X goproxy/pkg/proxy.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              -o "$stage/goproxy" ./cli
+            cp LICENSE README.md "$stage/"
+            tar -C "$stage" -czf "dist/goproxy-$version-linux-$arch.tar.gz" goproxy LICENSE README.md
+          done
+          (cd dist && sha256sum ./*.tar.gz > checksums.txt)
+          ls -l dist
+
+      - name: Check the binary reports the version it was released as
+        run: |
+          set -euo pipefail
+          reported=$(./build/linux-amd64/goproxy -version)
+          echo "$reported"
+          case "$reported" in
+            "goproxy version ${{ steps.version.outputs.version }},"*) ;;
+            *)
+              echo "::error::the binary reports '$reported', which does not start with the version being released"
+              exit 1
+              ;;
+          esac
+
+      - name: Create the release
+        run: |
+          set -euo pipefail
+          flags=""
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            flags="--prerelease"
+          fi
+          gh release create "${{ steps.version.outputs.tag }}" \
+            dist/goproxy-*.tar.gz dist/checksums.txt \
+            --title "${{ steps.version.outputs.tag }}" \
+            --target "$GITHUB_SHA" \
+            --generate-notes \
+            $flags

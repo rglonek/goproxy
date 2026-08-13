@@ -1,0 +1,38 @@
+# Terminate TLS with your own certificate, and redirect plain HTTP to HTTPS.
+#
+# Generate a self-signed pair to try it out:
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+#     -keyout snakeoil.pem -out snakeoil.crt -subj "/CN=localhost"
+#
+# Certificates are loaded and parsed at startup, so a broken one is a startup
+# error rather than a listener that fails every handshake. List more than one
+# and the certificate matching the SNI name is served. SIGHUP re-reads them, so
+# a renewal does not need a restart.
+
+version: 2
+
+listeners:
+  http:
+    addr: ":8080"
+    redirect_to_https: true # the default whenever an https listener exists
+  https:
+    addr: ":8443"
+    tls:
+      min_version: "1.2" # the default; "1.3" for modern-only
+      certs:
+        - cert_file: "snakeoil.crt"
+          key_file: "snakeoil.pem"
+      # mutual TLS: require a client certificate signed by this CA
+      # client_auth:
+      #   mode: require_and_verify
+      #   ca_file: "/etc/ssl/certs/client-ca.pem"
+      # HSTS is opt-in: a wrong max_age is very hard to recover from
+      hsts:
+        enabled: false
+        max_age: 31536000
+        include_subdomains: false
+
+rules:
+  - name: app
+    proxy:
+      url: "http://127.0.0.1:8081"

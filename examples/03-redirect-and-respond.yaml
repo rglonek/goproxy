@@ -1,21 +1,27 @@
-# Redirect one path, return a canned response for everything else.
+# Redirects and canned responses, and how rule order works.
 #
-#   ./goproxy -config examples/03-redirect-and-respond.yaml
-#   curl -i http://localhost:8080/old-docs   # 301 to the new location
-#   curl -i http://localhost:8080/           # 403 Forbidden
-#
-# Rules are evaluated top to bottom and the first match wins, so a rule with no
-# domain_match/path_match acts as a catch-all and must come last.
+# Rules are evaluated in order and the first match wins, so the catch-all goes
+# last. {path} and {query} are filled in from the request, which is what makes
+# "this whole tree moved" expressible.
 
-listen_addr: ":8080"
-log_level: info
+version: 2
+
+listeners:
+  http:
+    addr: ":8080"
 
 rules:
-  - path_match: "/old-docs"
-    redirect_rule:
-      redirect_url: "https://example.com/docs"
-      redirect_status_code: 301 # must be a 3xx code
+  - name: old-docs
+    match:
+      path: "/old-docs"
+    redirect:
+      to: "https://example.com/docs{path}{query}"
+      status: 301 # must be a 3xx code
 
-  - respond_rule:
-      respond_status_code: 403
-      respond_body: "Forbidden"
+  - name: catch-all
+    respond:
+      status: 403
+      body: "<h1>Forbidden</h1>"
+      content_type: "text/html; charset=utf-8"
+      headers:
+        X-Frame-Options: DENY

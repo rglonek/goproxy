@@ -1,1 +1,4 @@
 bin/
+# where the release workflow stages and packages its artefacts
+build/
+dist/

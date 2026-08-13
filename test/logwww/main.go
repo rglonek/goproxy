@@ -3,15 +3,20 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strconv"
+	"sync/atomic"
 
-	"github.com/lithammer/shortuuid"
 	"github.com/rglonek/logger"
 )
 
+// requests numbers the requests: an id that sorts in arrival order is more
+// useful in a log than a random one.
+var requests atomic.Uint64
+
 func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		uuid := shortuuid.New()
-		log := logger.NewLogger().WithPrefix(uuid + " " + r.RemoteAddr + " ")
+		id := strconv.FormatUint(requests.Add(1), 10)
+		log := logger.NewLogger().WithPrefix(id + " " + r.RemoteAddr + " ")
 		// Log request details
 		log.Info("Path=%s Method=%s Host=%s", r.URL.Path, r.Method, r.Host)
 

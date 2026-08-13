@@ -1,0 +1,54 @@
+# Several backends behind one rule: load balancing, health checking and
+# failover.
+#
+# An upstream is a named set of targets plus how to choose between them. A
+# target that keeps failing is taken out of service and re-probed after a
+# cool-off; a request that never reached its target can be retried against
+# another one.
+#
+# Watch it work:
+#   curl -s http://127.0.0.1:9090/metrics | grep goproxy_upstream
+
+version: 2
+
+listeners:
+  http:
+    addr: ":8080"
+
+admin:
+  addr: "127.0.0.1:9090"
+
+upstreams:
+  app:
+    targets:
+      - url: "http://10.0.0.1:8081"
+        weight: 2 # takes twice the share of the other
+      - url: "http://10.0.0.2:8081"
+    # round_robin (default) | least_conn | ip_hash | first_healthy
+    policy: round_robin
+    health:
+      # on by default: eject after N consecutive failures, re-probe after the
+      # cool-off
+      passive:
+        failures: 3
+        cooldown: 30s
+      # opt-in: poll every target on an interval
+      active:
+        path: "/healthz"
+        interval: 10s
+        timeout: 2s
+        expect_status: [200]
+    retry:
+      attempts: 2
+      on: [connect_error, "502", "503"]
+      # retries are capped as a share of live traffic, so a failing upstream
+      # cannot be turned into a traffic multiplier
+      budget: 10%
+    # tls:
+    #   ca_file: "/etc/ssl/certs/internal-ca.pem"   # pin an internal CA
+    #   insecure_skip_verify: false
+
+rules:
+  - name: app
+    proxy:
+      upstream: app

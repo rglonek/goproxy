@@ -1,0 +1,75 @@
+# Authentication: basic, token, and handing the decision to another service.
+#
+# Auth blocks are named and reusable - several rules can share one. Within a
+# block the authenticators are tried in the order token, basic, forward, and the
+# first one that accepts the request wins. Credentials are compared in constant
+# time, the credential goproxy consumed is not passed upstream, and nothing a
+# client presented is ever written to the log.
+#
+# Generate a bcrypt hash for password_hash with:
+#   htpasswd -nbB alice 'wonderland' | cut -d: -f2
+
+version: 2
+
+listeners:
+  http:
+    addr: ":8080"
+
+auth:
+  # user names and passwords, for a browser
+  staff:
+    basic:
+      users:
+        - user: "alice"
+          password: "wonderland"
+        - user: "bob"
+          password_hash: "$2y$10$eOjbmDbVE1O0h.4jTZ5wLu3xUf7L2rC1hV9wPUMzYcRt.hRPtGSPa"
+        # or read it from a file, so the config holds no secret at all:
+        # - user: "carol"
+        #   password_file: "/etc/goproxy/carol.pw"
+      realm: "Internal"
+      forward_user_header: "X-USER" # the backend receives X-USER: alice
+
+  # static tokens, for scripts and CI
+  api:
+    token:
+      header: "X-TOKEN"
+      accept_bearer: true # Authorization: Bearer <token> works too
+      forward: false # the token goproxy consumed is not passed upstream
+      tokens:
+        - id: "ci" # the id appears in logs; the token never does
+          value: "token1"
+        - id: "deploy"
+          value_env: "GOPROXY_DEPLOY_TOKEN"
+
+  # ask another service, the way nginx auth_request and Traefik ForwardAuth do
+  sso:
+    forward:
+      url: "http://127.0.0.1:9000/auth"
+      timeout: 5s
+      user_header: "X-Auth-User" # response header naming the user
+      copy_headers: ["X-Auth-Groups"] # copied onto the upstream request
+
+rules:
+  - name: api
+    match:
+      path: "/api"
+      path_mode: segment # /api and /api/v1 match, /apifoo does not
+    auth: api
+    proxy:
+      url: "http://127.0.0.1:8081"
+      strip_prefix: "/api"
+
+  - name: app
+    match:
+      path: "/app"
+    auth: staff
+    proxy:
+      url: "http://127.0.0.1:8081"
+
+  - name: private
+    match:
+      path: "/private"
+    auth: sso
+    proxy:
+      url: "http://127.0.0.1:8081"
