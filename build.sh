@@ -15,27 +15,44 @@ LDFLAGS="-s -w"
 LDFLAGS="$LDFLAGS -X goproxy/pkg/proxy.commit=$COMMIT"
 LDFLAGS="$LDFLAGS -X goproxy/pkg/proxy.buildDate=$BUILD_DATE"
 
-build() {
-	local goos="$1" goarch="$2" out="$3"
-	rm -rf goproxy goproxy.exe
-	GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$LDFLAGS" -o "$out" ./cli
+ROOT=$(pwd)
+
+# Every archive holds a single goproxy-$VERSION/ directory, so unpacking one
+# never scatters files over whatever the user happened to be standing in.
+package() {
+	local goos="$1" goarch="$2" binary="goproxy"
+	[ "$goos" = windows ] && binary="goproxy.exe"
+
+	local staging="build/$goos-$goarch"
+	local dir="$staging/goproxy-$VERSION"
+	rm -rf "$staging"
+	mkdir -p "$dir/config-examples"
+
+	GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$LDFLAGS" -o "$dir/$binary" ./cli
+	cp LICENSE README.md "$dir/"
+	cp examples/*.yaml examples/README.md "$dir/config-examples/"
+	# systemd is linux only, so shipping the unit anywhere else is noise
+	if [ "$goos" = linux ]; then
+		cp packaging/goproxy.service "$dir/"
+	fi
+
+	if [ "$goos" = windows ]; then
+		(cd "$staging" && zip -qr "$ROOT/bin/goproxy-$VERSION-$goos-$goarch.zip" "goproxy-$VERSION")
+	else
+		tar -C "$staging" -czf "bin/goproxy-$VERSION-$goos-$goarch.tar.gz" "goproxy-$VERSION"
+	fi
+	echo "bin/goproxy-$VERSION-$goos-$goarch"
 }
 
-rm -rf bin
+rm -rf bin build
 mkdir -p bin
-build linux amd64 goproxy
-tar -zcvf bin/goproxy-$VERSION-linux-amd64.tar.gz goproxy
-build linux arm64 goproxy
-tar -zcvf bin/goproxy-$VERSION-linux-arm64.tar.gz goproxy
-build darwin amd64 goproxy
-tar -zcvf bin/goproxy-$VERSION-darwin-amd64.tar.gz goproxy
-build darwin arm64 goproxy
-tar -zcvf bin/goproxy-$VERSION-darwin-arm64.tar.gz goproxy
-build windows amd64 goproxy.exe
-zip bin/goproxy-$VERSION-windows-amd64.zip goproxy.exe
-build windows arm64 goproxy.exe
-zip bin/goproxy-$VERSION-windows-arm64.zip goproxy.exe
-rm -rf goproxy goproxy.exe
+package linux amd64
+package linux arm64
+package darwin amd64
+package darwin arm64
+package windows amd64
+package windows arm64
+rm -rf build
 
 cd bin
 artefacts=$(ls)
