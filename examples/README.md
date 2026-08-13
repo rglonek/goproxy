@@ -1,15 +1,16 @@
 # Examples
 
-Small, single-purpose configs. Each one runs on its own:
+Small, single-purpose configs. Each one runs on its own (in a release tarball
+this directory is `config-examples/`):
 
 ```bash
 ./goproxy -config examples/01-reverse-proxy.yaml -check   # validate it
 ./goproxy -config examples/01-reverse-proxy.yaml          # run it
 ```
 
-Several examples proxy to `http://127.0.0.1:8081`. The repo ships a test backend
-that logs whatever it receives, which is handy for checking headers and query
-parameters:
+Several examples proxy to `http://127.0.0.1:8081`. The repository ships a test
+backend that logs whatever it receives, which is handy for checking headers and
+query parameters:
 
 ```bash
 go run ./test/logwww    # listens on :8081
@@ -29,7 +30,8 @@ go run ./test/logwww    # listens on :8081
 
 The full set of options is the configuration reference in the
 [main README](../README.md). Upgrading from v0.x? See
-[docs/MIGRATION.md](../docs/MIGRATION.md).
+[docs/MIGRATION.md](https://github.com/rglonek/goproxy/blob/main/docs/MIGRATION.md),
+which is in the repository rather than the release tarball.
 
 ## Things worth knowing
 

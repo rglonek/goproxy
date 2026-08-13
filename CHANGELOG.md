@@ -110,9 +110,14 @@ half-understood.
   flag anyone has to remember.
 * A manually-triggered **Release** workflow builds `linux/amd64` and
   `linux/arm64` on one runner with `CGO_ENABLED=0`, packages each as a tarball
-  with `LICENSE` and `README.md`, and publishes them with a `checksums.txt`. The
-  version comes from the file alone, and the run refuses to release over an
-  existing tag.
+  and publishes them with a `checksums.txt`. The version comes from the file
+  alone, and the run refuses to release over an existing tag.
+* Every archive holds a single `goproxy-<version>/` directory, so unpacking one
+  leaves that directory behind instead of scattering files over the current one.
+  Alongside the binary, `LICENSE` and `README.md` it carries `config-examples/`
+  - the `examples/` configs - and `goproxy.service`, a systemd unit to copy into
+  `/etc/systemd/system` and edit. The workflow checks that layout before it
+  publishes anything.
 
 ### Kept from 0.3.0
 

@@ -349,15 +349,38 @@ drift apart, and there is no build flag to forget.
    become the latest release.
 
 The workflow builds `linux/amd64` and `linux/arm64` on one runner with
-`CGO_ENABLED=0`, packages each as `goproxy-<version>-linux-<arch>.tar.gz`
-containing the binary, `LICENSE` and `README.md`, checks that the binary reports
-the version being released, and creates the GitHub release `v<version>` with the
-tarballs and a `checksums.txt`.
+`CGO_ENABLED=0`, packages each as `goproxy-<version>-linux-<arch>.tar.gz`,
+checks that the binary reports the version being released, and creates the
+GitHub release `v<version>` with the tarballs and a `checksums.txt`.
+
+Every archive holds a single `goproxy-<version>/` directory, so unpacking one
+leaves that directory behind rather than scattering files:
+
+```
+goproxy-1.0.0/
+├── goproxy            # the binary
+├── goproxy.service    # a systemd unit to copy and edit
+├── LICENSE
+├── README.md
+└── config-examples/   # the examples/ directory, one config per feature
+```
 
 ```bash
 tar -xzf goproxy-1.0.0-linux-amd64.tar.gz
+cd goproxy-1.0.0
 ./goproxy -version      # goproxy version 1.0.0, commit abc1234, built ..., go1.25.12
+./goproxy -config config-examples/01-reverse-proxy.yaml -check
 ```
+
+## Running it under systemd
+
+`goproxy.service` in the tarball ([`packaging/goproxy.service`](packaging/goproxy.service)
+in the repository) is a starting point: it runs as a `goproxy` system user with
+`CAP_NET_BIND_SERVICE` so it can bind 80 and 443, reads `/etc/goproxy/config.yaml`,
+refuses to start when that config does not compile, and maps `systemctl reload`
+onto the `SIGHUP` reload. Copy it to `/etc/systemd/system/`, adjust the paths and
+the sandboxing to taste, then `systemctl enable --now goproxy`. The header of the
+file lists the commands.
 
 ## Using it as a library
 

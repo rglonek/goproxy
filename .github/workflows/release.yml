@@ -61,22 +61,44 @@ jobs:
           version=${{ steps.version.outputs.version }}
           mkdir -p dist
           for arch in amd64 arm64; do
-            stage="build/linux-$arch"
-            mkdir -p "$stage"
+            # everything is staged under goproxy-<version>/, so unpacking a
+            # tarball leaves one directory behind instead of scattering files
+            stage="build/linux-$arch/goproxy-$version"
+            mkdir -p "$stage/config-examples"
             GOOS=linux GOARCH="$arch" go build \
               -trimpath \
               -ldflags "-s -w -X goproxy/pkg/proxy.commit=${GITHUB_SHA::7} -X goproxy/pkg/proxy.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               -o "$stage/goproxy" ./cli
-            cp LICENSE README.md "$stage/"
-            tar -C "$stage" -czf "dist/goproxy-$version-linux-$arch.tar.gz" goproxy LICENSE README.md
+            cp LICENSE README.md packaging/goproxy.service "$stage/"
+            cp examples/*.yaml examples/README.md "$stage/config-examples/"
+            tar -C "build/linux-$arch" -czf "dist/goproxy-$version-linux-$arch.tar.gz" "goproxy-$version"
           done
           (cd dist && sha256sum ./*.tar.gz > checksums.txt)
           ls -l dist
 
+      - name: Check every tarball unpacks into goproxy-<version>/
+        run: |
+          set -euo pipefail
+          version=${{ steps.version.outputs.version }}
+          for tarball in dist/*.tar.gz; do
+            echo "$tarball"
+            tar -tzf "$tarball" | tee /tmp/listing
+            if grep -qv "^goproxy-$version/" /tmp/listing; then
+              echo "::error::$tarball has entries outside goproxy-$version/"
+              exit 1
+            fi
+            for wanted in goproxy LICENSE README.md goproxy.service config-examples/README.md; do
+              if ! grep -qx "goproxy-$version/$wanted" /tmp/listing; then
+                echo "::error::$tarball is missing $wanted"
+                exit 1
+              fi
+            done
+          done
+
       - name: Check the binary reports the version it was released as
         run: |
           set -euo pipefail
-          reported=$(./build/linux-amd64/goproxy -version)
+          reported=$(./build/linux-amd64/goproxy-${{ steps.version.outputs.version }}/goproxy -version)
           echo "$reported"
           case "$reported" in
             "goproxy version ${{ steps.version.outputs.version }},"*) ;;

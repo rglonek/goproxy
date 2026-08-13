@@ -1,0 +1,73 @@
+# A starting point, not a finished deployment: copy it to
+# /etc/systemd/system/goproxy.service, change what does not suit you, then
+#
+#   useradd --system --no-create-home --shell /usr/sbin/nologin goproxy
+#   install -m 0755 goproxy /usr/local/bin/goproxy
+#   install -d -m 0750 -o root -g goproxy /etc/goproxy
+#   install -m 0640 -o root -g goproxy config.yaml /etc/goproxy/config.yaml
+#   systemctl daemon-reload
+#   systemctl enable --now goproxy
+#
+# Edit the config and `systemctl reload goproxy`: goproxy re-reads the file on
+# SIGHUP, and keeps serving the old config if the new one does not compile.
+
+[Unit]
+Description=goproxy - a small reverse proxy
+Documentation=https://github.com/rglonek/goproxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goproxy
+Group=goproxy
+
+# Refuse to start on a broken config rather than dropping the listener.
+ExecStartPre=/usr/local/bin/goproxy -config /etc/goproxy/config.yaml -check
+ExecStart=/usr/local/bin/goproxy -config /etc/goproxy/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5s
+
+# /var/lib/goproxy, created and owned by systemd: where the Let's Encrypt cache
+# belongs if you use one. /var/log/goproxy likewise, for a file access log;
+# logging to stdout (the default) goes to the journal instead.
+StateDirectory=goproxy
+StateDirectoryMode=0750
+LogsDirectory=goproxy
+LogsDirectoryMode=0750
+
+# Binding 80 and 443 without running as root. Drop both lines if the listeners
+# are all above 1024.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Sandboxing. Serving files from outside the state and logs directories needs
+# those paths added to ReadOnlyPaths=.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
