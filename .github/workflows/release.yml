@@ -6,10 +6,6 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to release. Must match the VERSION file, e.g. 1.0.0"
-        required: true
-        type: string
       prerelease:
         description: "Mark the release as a pre-release"
         required: false
@@ -34,7 +30,7 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
-      - name: Read and confirm the version
+      - name: Read the version
         id: version
         run: |
           set -euo pipefail
@@ -47,12 +43,7 @@ jobs:
             echo "::error::VERSION is $version, which is not a version like 1.2.3 or 1.2.3-rc1"
             exit 1
           fi
-          # the dispatch asks for the version so that releasing is a deliberate
-          # act rather than whatever happens to be committed
-          if [ "$version" != "${{ inputs.version }}" ]; then
-            echo "::error::you asked to release ${{ inputs.version }} but VERSION says $version; bump the file or correct the input"
-            exit 1
-          fi
+          echo "releasing v$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 

@@ -343,9 +343,10 @@ It is embedded in the binary, so `goproxy -version` and the release tag cannot
 drift apart, and there is no build flag to forget.
 
 1. Bump `VERSION` (e.g. `1.1.0`) and merge to `main`.
-2. Run the **Release** workflow from the Actions tab, typing the same version
-   into the prompt. It refuses to run if that does not match the file, or if the
-   tag already exists.
+2. Run the **Release** workflow from the Actions tab. It takes the version from
+   the file - there is nothing to type - and refuses to run if that tag has
+   already been released. Tick *prerelease* for an `-rc` build so it does not
+   become the latest release.
 
 The workflow builds `linux/amd64` and `linux/arm64` on one runner with
 `CGO_ENABLED=0`, packages each as `goproxy-<version>-linux-<arch>.tar.gz`

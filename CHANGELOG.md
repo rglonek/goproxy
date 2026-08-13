@@ -110,9 +110,9 @@ half-understood.
   flag anyone has to remember.
 * A manually-triggered **Release** workflow builds `linux/amd64` and
   `linux/arm64` on one runner with `CGO_ENABLED=0`, packages each as a tarball
-  with `LICENSE` and `README.md`, and publishes them with a `checksums.txt`. It
-  confirms the version typed at dispatch against the file, and refuses to
-  release over an existing tag.
+  with `LICENSE` and `README.md`, and publishes them with a `checksums.txt`. The
+  version comes from the file alone, and the run refuses to release over an
+  existing tag.
 
 ### Kept from 0.3.0
 
