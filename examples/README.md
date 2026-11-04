@@ -21,7 +21,7 @@ go run ./test/logwww    # listens on :8081
 | [01-reverse-proxy.yaml](01-reverse-proxy.yaml) | Forward everything to one backend |
 | [02-serve-static-files.yaml](02-serve-static-files.yaml) | Serve a local directory |
 | [03-redirect-and-respond.yaml](03-redirect-and-respond.yaml) | Redirects, canned responses, rule ordering |
-| [04-auth.yaml](04-auth.yaml) | Basic auth, token auth, and forward auth |
+| [04-auth.yaml](04-auth.yaml) | Basic auth, token auth, forward auth, and a backend API key kept out of the file |
 | [05-virtual-hosts.yaml](05-virtual-hosts.yaml) | Routing by host and path: exact, wildcard, regex |
 | [06-https.yaml](06-https.yaml) | TLS with your own certificate, mutual TLS, HSTS |
 | [07-lets-encrypt.yaml](07-lets-encrypt.yaml) | Automatic certificates from Let's Encrypt |
@@ -70,3 +70,4 @@ Common ones:
 | `listeners.https.tls.acme: listeners.http.addr must end with :80` | Let's Encrypt needs port 80 for the http-01 challenge |
 | `no upstream named "x" (did you mean "y"?)` | A typo in `proxy.upstream`, or a missing `upstreams` entry |
 | `trusted_proxies[N]: must be an IP address or a CIDR` | Entries are `10.0.0.0/8` or `127.0.0.1`, not host names |
+| `environment variable X is not set` | A `value_env` names a variable goproxy was not started with |

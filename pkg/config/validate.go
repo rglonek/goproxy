@@ -533,12 +533,15 @@ func (h *Headers) validate() error {
 	if h == nil {
 		return nil
 	}
-	for name := range h.Set {
+	for _, name := range sortedKeys(h.Set) {
 		if slices.ContainsFunc(hopByHopHeaders, func(hop string) bool { return strings.EqualFold(hop, name) }) {
 			return fmt.Errorf("set: %q is a hop-by-hop header and cannot be forwarded", name)
 		}
 		if name != http.CanonicalHeaderKey(name) && strings.ContainsAny(name, " \t\r\n") {
 			return fmt.Errorf("set: %q is not a valid header name", name)
+		}
+		if err := h.Set[name].validate(); err != nil {
+			return fmt.Errorf("set.%s%w", name, err)
 		}
 	}
 	for i, name := range h.Remove {
@@ -546,6 +549,29 @@ func (h *Headers) validate() error {
 			if _, err := regexp.Compile(name); err != nil {
 				return fmt.Errorf("remove[%d]: invalid regular expression: %w", i, err)
 			}
+		}
+	}
+	return nil
+}
+
+// validate checks the shape of a header value. Like a token's value_env, the
+// variable is only read when the config is compiled, which -check does too.
+func (v HeaderValue) validate() error {
+	set := 0
+	for _, value := range []string{v.Value, v.ValueEnv, v.ValueFile} {
+		if value != "" {
+			set++
+		}
+	}
+	if v.mapped && set == 0 {
+		return fmt.Errorf(": one of value, value_env or value_file is required")
+	}
+	if set > 1 {
+		return fmt.Errorf(": value, value_env and value_file are mutually exclusive")
+	}
+	if v.ValueFile != "" {
+		if err := mustExist(v.ValueFile); err != nil {
+			return fmt.Errorf(".value_file: %w", err)
 		}
 	}
 	return nil

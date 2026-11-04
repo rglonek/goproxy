@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -586,6 +587,99 @@ rules:
 	// the admin listener is not the routed one
 	resp, _ = get(t, server.url("/healthz"))
 	equal(t, "healthz is not routed", resp.StatusCode, http.StatusUnauthorized)
+}
+
+// The setup this exists for: goproxy checks a person's password, then calls
+// the backend with a key of its own that the config file does not hold.
+func TestUpstreamCredentialsFromOutsideTheConfig(t *testing.T) {
+	backend := newEchoBackend(t, "app")
+	dir := t.TempDir()
+	keyFile := writeFile(t, dir, "app.key", "file-key-1\n")
+	t.Setenv("GOPROXY_TEST_UPSTREAM_KEY", "env-key-secret")
+
+	path := writeFile(t, dir, "config.yaml", fmt.Sprintf(`
+version: 2
+listeners:
+  http: { addr: "127.0.0.1:0" }
+admin: { addr: "127.0.0.1:0" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: "wonderland" }]
+rules:
+  - name: app
+    auth: staff
+    proxy:
+      url: %q
+      request_headers:
+        set:
+          Authorization: { prefix: "Bearer ", value_env: GOPROXY_TEST_UPSTREAM_KEY }
+          X-App-Key: { value_file: %q }
+          X-Literal-Token: "literal-token-secret"
+`, backend.URL, keyFile))
+	server := startTestServer(t, parseFile(t, path))
+
+	send := func() echo {
+		t.Helper()
+		req := request(t, http.MethodGet, server.url("/x"), nil)
+		req.SetBasicAuth("alice", "wonderland")
+		resp, body := do(t, req)
+		equal(t, "status", resp.StatusCode, http.StatusOK)
+		return decodeEcho(t, body)
+	}
+
+	got := send()
+	// the client's basic credential was consumed; the backend sees goproxy's
+	equal(t, "Authorization", got.Header.Get("Authorization"), "Bearer env-key-secret")
+	equal(t, "X-App-Key", got.Header.Get("X-App-Key"), "file-key-1")
+	equal(t, "X-Literal-Token", got.Header.Get("X-Literal-Token"), "literal-token-secret")
+
+	resp, body := get(t, server.adminURL("/config"))
+	equal(t, "config", resp.StatusCode, http.StatusOK)
+	contains(t, body, "value_env: GOPROXY_TEST_UPSTREAM_KEY")
+	contains(t, body, "X-Literal-Token: REDACTED")
+	for _, secret := range []string{"env-key-secret", "file-key-1", "literal-token-secret", "wonderland"} {
+		notContains(t, body, secret)
+	}
+
+	// a reload reads the file again, the way it does a password_file
+	writeFileAt(t, keyFile, "file-key-2\n")
+	if err := server.ReloadFile(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	equal(t, "X-App-Key after reload", send().Header.Get("X-App-Key"), "file-key-2")
+
+	// and a file that went away is a rejected reload, not a request without
+	// its credential
+	if err := os.Remove(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	err := server.ReloadFile()
+	if err == nil {
+		t.Fatal("a reload with a missing value_file was accepted")
+	}
+	contains(t, err.Error(), "rules[0] (app).proxy.request_headers.set.X-App-Key.value_file: does not exist")
+	equal(t, "X-App-Key after a rejected reload", send().Header.Get("X-App-Key"), "file-key-2")
+}
+
+func TestUnsetUpstreamCredentialStopsStartup(t *testing.T) {
+	cfg := parse(t, `
+version: 2
+listeners:
+  http: { addr: "127.0.0.1:0" }
+rules:
+  - name: app
+    proxy:
+      url: "http://127.0.0.1:8081"
+      request_headers:
+        set:
+          Authorization: { prefix: "Bearer ", value_env: GOPROXY_TEST_UNSET_KEY }
+`)
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("a config whose header variable is unset compiled")
+	}
+	contains(t, err.Error(), "rules[0] (app): proxy: request_headers.set.Authorization: environment variable GOPROXY_TEST_UNSET_KEY is not set")
 }
 
 func TestReloadUnderLoad(t *testing.T) {

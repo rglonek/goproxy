@@ -45,6 +45,71 @@ func TestJoinPath(t *testing.T) {
 	}
 }
 
+func TestHeaderRewrite(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyFile, []byte("file-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOPROXY_TEST_UPSTREAM_KEY", "env-key")
+
+	rewrite, err := compileHeaders(&config.Headers{
+		Set: map[string]config.HeaderValue{
+			"X-Env":         {Value: "prod"},
+			"Authorization": {Prefix: "Bearer ", ValueEnv: "GOPROXY_TEST_UPSTREAM_KEY"},
+			"X-File-Key":    {ValueFile: keyFile},
+		},
+		Remove: []string{"User-Agent", "^X-Secret-.*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := http.Header{}
+	header.Set("Authorization", "Basic YWxpY2U6d29uZGVybGFuZA==")
+	header.Set("User-Agent", "test")
+	header.Set("X-Secret-One", "a")
+	rewrite.apply(header)
+
+	for name, want := range map[string]string{
+		"X-Env":         "prod",
+		"Authorization": "Bearer env-key", // replaces what the client sent
+		"X-File-Key":    "file-key",
+		"User-Agent":    "",
+		"X-Secret-One":  "",
+	} {
+		if got := header.Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+
+	// the file is read when the block is compiled, not per request: a reload
+	// is what picks up a new value
+	if err := os.WriteFile(keyFile, []byte("rotated-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	header = http.Header{}
+	rewrite.apply(header)
+	if got := header.Get("X-File-Key"); got != "file-key" {
+		t.Errorf("X-File-Key = %q after the file changed, want the value read at compile time", got)
+	}
+
+	// a nil block changes nothing
+	var none *headerRewrite
+	none.apply(header)
+}
+
+func TestHeaderRewriteErrorsNameTheHeader(t *testing.T) {
+	_, err := compileHeaders(&config.Headers{
+		Set: map[string]config.HeaderValue{"Authorization": {Prefix: "Bearer ", ValueEnv: "GOPROXY_TEST_UNSET"}},
+	})
+	if err == nil {
+		t.Fatal("an unset environment variable was accepted")
+	}
+	if want := "set.Authorization: environment variable GOPROXY_TEST_UNSET is not set"; err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
 func TestRespondContentTypeAndBody(t *testing.T) {
 	dir := t.TempDir()
 	page := filepath.Join(dir, "page.html")

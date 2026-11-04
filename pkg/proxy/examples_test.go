@@ -22,6 +22,7 @@ func TestExampleConfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GOPROXY_DEPLOY_TOKEN", "deploy-token")
+	t.Setenv("GOPROXY_APP_KEY", "app-key")
 
 	replacements := strings.NewReplacer(
 		"/var/www/html", webroot,

@@ -61,7 +61,7 @@ func newBasic(cfg *config.BasicAuth) (*basicAuth, error) {
 			}
 			entry.bcrypted = []byte(user.PasswordHash)
 		default:
-			password, err := resolveSecret(user.Password, "", user.PasswordFile)
+			password, err := config.ResolveSecret(user.Password, "", user.PasswordFile)
 			if err != nil {
 				return nil, fmt.Errorf("users[%d]: %w", i, err)
 			}

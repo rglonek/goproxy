@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Configuration
+
+* A `request_headers.set` or `response_headers.set` value can now be a mapping
+  that reads it from `value_env` or `value_file`, with an optional `prefix`, so
+  a key goproxy sends to a backend does not have to sit in the config file:
+  `Authorization: { prefix: "Bearer ", value_env: APP_API_KEY }`. A plain string
+  works as before. As with token and password secrets, the value is read when
+  the config is loaded: an unset variable, an empty value or a missing file
+  stops startup, `-check` and a reload, with an error naming the header, and a
+  reload reads the file again. A value containing a line break is refused
+  rather than failing every request.
+
+### Observability
+
+* `GET /config` now redacts header values as well: the literal value of any
+  header in `request_headers.set`, `response_headers.set` or `respond.headers`
+  whose name marks it as a credential (`Authorization`, `Cookie`, `Set-Cookie`,
+  or a name containing `auth`, `token`, `key`, `secret`, `password`, `passwd`,
+  `credential` or `session`) is shown as `REDACTED`. Before, a key written into
+  `request_headers.set` was shown in full.
+
+### Library
+
+* `config.Headers.Set` is a `map[string]config.HeaderValue` rather than a
+  `map[string]string`; a plain value is `config.HeaderValue{Value: "..."}`.
+  `config.ResolveSecret` is the env/file lookup that token, password and header
+  secrets share.
+
 ## 1.0.0 (unreleased)
 
 The redesign in [docs/designs/next](docs/designs/next), phases 3 to 5: the

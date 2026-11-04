@@ -391,7 +391,10 @@ type Proxy struct {
 }
 
 type Headers struct {
-	Set map[string]string `yaml:"set"`
+	// set: header name to value. A value is a string, or a mapping that reads
+	// it from value_env or value_file so the config does not hold it; see
+	// HeaderValue.
+	Set map[string]HeaderValue `yaml:"set"`
 	// remove: header names, or regular expressions when they start with ^
 	Remove []string `yaml:"remove"`
 }

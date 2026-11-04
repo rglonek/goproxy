@@ -8,6 +8,10 @@
 #
 # Generate a bcrypt hash for password_hash with:
 #   htpasswd -nbB alice 'wonderland' | cut -d: -f2
+#
+# Two secrets below are read from the environment rather than written here, so
+# set them before running or checking this file:
+#   GOPROXY_DEPLOY_TOKEN=... GOPROXY_APP_KEY=... ./goproxy -config examples/04-auth.yaml -check
 
 version: 2
 
@@ -66,6 +70,17 @@ rules:
     auth: staff
     proxy:
       url: "http://127.0.0.1:8081"
+      # The person's basic credentials stop here (basic.forward is false). The
+      # backend gets an API key of goproxy's own instead, and the config file
+      # does not hold it: it is read from the environment at startup, and
+      # /config shows only the variable's name.
+      request_headers:
+        set:
+          Authorization:
+            prefix: "Bearer "
+            value_env: "GOPROXY_APP_KEY"
+            # or read it from a file, which a reload reads again:
+            # value_file: "/etc/goproxy/app.key"
 
   - name: private
     match:
