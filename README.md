@@ -173,6 +173,31 @@ expressions when they start with `^`. The Host the client sent is forwarded
 unless `host_header` says otherwise; `X-Forwarded-For`, `-Host`, `-Proto` and
 `X-Real-Ip` are set from the connection.
 
+A `set` value is a string, or a mapping that reads it from `value_env` or
+`value_file` so a credential for the backend does not have to sit in the config
+file. `prefix` is put in front of what was read:
+
+```yaml
+rules:
+  - name: app
+    auth: staff                  # the person signs in to goproxy...
+    proxy:
+      url: "http://127.0.0.1:8000"
+      request_headers:
+        set:
+          X-Env: prod
+          # ...and the backend gets goproxy's own key, not their password
+          Authorization: { prefix: "Bearer ", value_env: APP_API_KEY }
+          # or { prefix: "Bearer ", value_file: "/etc/goproxy/app.key" }
+```
+
+As with a token's `value_env` and a user's `password_file`, the value is read
+when the config is loaded: an unset variable or a missing file stops startup,
+`-check` and a reload, and the error names the header. A reload reads the file
+again; a variable comes from goproxy's own environment, which a reload does not
+change. A file's trailing line break is dropped. `response_headers.set` takes
+the same forms.
+
 **`serve`** — `dir`, `strip_prefix`, `index`, `list_directories`,
 `allow_dotfiles`, `cache_control`. The directory is opened once at startup and
 served through that handle, so a symlink out of it is refused by the kernel.
@@ -274,9 +299,17 @@ collide with a catch-all rule:
 | `GET /healthz` | Liveness |
 | `GET /readyz` | Readiness: 503 while starting, while shutting down, or when an upstream has no healthy target |
 | `GET /metrics` | Prometheus |
-| `GET /config` | The resolved config, with secrets redacted |
+| `GET /config` | The loaded config, with secrets shown as `REDACTED` (see below) |
 | `POST /reload` | Same as `SIGHUP`, and returns the validation error on rejection |
 | `GET /debug/pprof/*` | Opt-in, off by default |
+
+`GET /config` redacts basic passwords and hashes, token values, and the literal
+value of any header in `request_headers.set`, `response_headers.set` or
+`respond.headers` whose name marks it as a credential - one containing `auth`,
+`cookie`, `token`, `key`, `secret`, `password`, `passwd`, `credential` or
+`session`, which covers `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key` and
+the like. A value read through `value_env`, `value_file` or `password_file` is never in the
+config to begin with; `/config` shows the variable's name or the file's path.
 
 One access-log record is written per request, after the response completes:
 

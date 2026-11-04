@@ -32,7 +32,7 @@ func newToken(cfg *config.TokenAuth) (*tokenAuth, error) {
 		auth.header = DefaultTokenHeader
 	}
 	for i, token := range cfg.Tokens {
-		value, err := resolveSecret(token.Value, token.ValueEnv, token.ValueFile)
+		value, err := config.ResolveSecret(token.Value, token.ValueEnv, token.ValueFile)
 		if err != nil {
 			return nil, fmt.Errorf("tokens[%d]: %w", i, err)
 		}

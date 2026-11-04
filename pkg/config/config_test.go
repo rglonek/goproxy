@@ -2,9 +2,13 @@ package config
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const minimal = `
@@ -400,6 +404,246 @@ rules:
 	}
 }
 
+func TestRedactedHeaderValues(t *testing.T) {
+	t.Setenv("GOPROXY_TEST_UPSTREAM_KEY", "from-the-environment")
+	cfg, err := Parse([]byte(`
+version: 2
+listeners:
+  http: { addr: ":8080" }
+rules:
+  - name: api
+    match: { path: /api }
+    proxy:
+      url: "http://127.0.0.1:8081"
+      request_headers:
+        set:
+          X-Env: prod
+          Authorization: "Bearer literal-key"
+          X-Api-Key: { value: "literal-api-key" }
+          X-Upstream-Auth: { prefix: "Bearer ", value_env: GOPROXY_TEST_UPSTREAM_KEY }
+      response_headers:
+        set: { Set-Cookie: "session=abc123", X-Frame-Options: DENY }
+  - respond:
+      status: 200
+      headers: { X-Auth-Token: "respond-secret", X-Custom: yes }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted := Redacted(cfg)
+	set := redacted.Rules[0].Proxy.RequestHeaders.Set
+	for name, want := range map[string]string{
+		"X-Env":         "prod",
+		"Authorization": "REDACTED",
+		"X-Api-Key":     "REDACTED",
+	} {
+		if got := set[name].Value; got != want {
+			t.Errorf("request_headers.set.%s = %q, want %q", name, got, want)
+		}
+	}
+	// a value from the environment is not in the config to begin with: only
+	// where it comes from is, and that is no secret
+	if got := set["X-Upstream-Auth"]; got.ValueEnv != "GOPROXY_TEST_UPSTREAM_KEY" || got.Prefix != "Bearer " || got.Value != "" {
+		t.Errorf("request_headers.set.X-Upstream-Auth = %+v", got)
+	}
+	response := redacted.Rules[0].Proxy.ResponseHeaders.Set
+	if got := response["Set-Cookie"].Value; got != "REDACTED" {
+		t.Errorf("response_headers.set.Set-Cookie = %q", got)
+	}
+	if got := response["X-Frame-Options"].Value; got != "DENY" {
+		t.Errorf("response_headers.set.X-Frame-Options = %q", got)
+	}
+	if got := redacted.Rules[1].Respond.Headers; got["X-Auth-Token"] != "REDACTED" || got["X-Custom"] != "yes" {
+		t.Errorf("respond.headers = %v", got)
+	}
+
+	encoded, err := yaml.Marshal(redacted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"literal-key", "literal-api-key", "from-the-environment", "abc123", "respond-secret"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Errorf("the redacted config still contains %q:\n%s", secret, encoded)
+		}
+	}
+	// a plain value is written back as the string it was written as
+	if !strings.Contains(string(encoded), "X-Env: prod") {
+		t.Errorf("X-Env was not written back as a plain string:\n%s", encoded)
+	}
+
+	// the original is untouched
+	if got := cfg.Rules[0].Proxy.RequestHeaders.Set["Authorization"].Value; got != "Bearer literal-key" {
+		t.Errorf("redacting modified the original config: %q", got)
+	}
+	if got := cfg.Rules[1].Respond.Headers["X-Auth-Token"]; got != "respond-secret" {
+		t.Errorf("redacting modified the original respond headers: %q", got)
+	}
+}
+
+func TestSensitiveHeader(t *testing.T) {
+	for name, want := range map[string]bool{
+		"Authorization":        true,
+		"proxy-authorization":  true,
+		"Cookie":               true,
+		"Set-Cookie":           true,
+		"X-Api-Key":            true,
+		"X-Auth-Token":         true,
+		"X-Amz-Security-Token": true,
+		"X-Session-Id":         true,
+		"X-Client-Secret":      true,
+		"X-Env":                false,
+		"X-Frame-Options":      false,
+		"Cache-Control":        false,
+		"X-Forwarded-Proto":    false,
+	} {
+		if got := SensitiveHeader(name); got != want {
+			t.Errorf("SensitiveHeader(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestHeaderValueForms(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyFile, []byte("from-a-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Parse([]byte(`
+version: 2
+listeners:
+  http: { addr: ":8080" }
+rules:
+  - proxy:
+      url: "http://127.0.0.1:8081"
+      request_headers:
+        set:
+          X-Plain: prod
+          X-Number: 5
+          X-Empty: ""
+          X-Literal: { value: "lit" }
+          Authorization: { prefix: "Bearer ", value_env: GOPROXY_TEST_UPSTREAM_KEY }
+          X-From-File: { value_file: "` + keyFile + `" }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOPROXY_TEST_UPSTREAM_KEY", "from-the-environment")
+	set := cfg.Rules[0].Proxy.RequestHeaders.Set
+	for name, want := range map[string]string{
+		"X-Plain":       "prod",
+		"X-Number":      "5",
+		"X-Empty":       "",
+		"X-Literal":     "lit",
+		"Authorization": "Bearer from-the-environment",
+		"X-From-File":   "from-a-file", // the editor's trailing newline is dropped
+	} {
+		got, err := set[name].Resolve()
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if set["X-Plain"].External() || !set["Authorization"].External() || !set["X-From-File"].External() {
+		t.Error("External() does not tell the literal values from the external ones")
+	}
+}
+
+func TestHeaderValueResolveErrors(t *testing.T) {
+	dir := t.TempDir()
+	twoLines := filepath.Join(dir, "two-lines")
+	if err := os.WriteFile(twoLines, []byte("first-secret\nsecond-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOPROXY_TEST_EMPTY", "")
+	t.Setenv("GOPROXY_TEST_NEWLINE", "a-secret\r\nInjected: yes")
+
+	tests := []struct {
+		value HeaderValue
+		want  string
+	}{
+		{HeaderValue{ValueEnv: "GOPROXY_TEST_UNSET"}, "environment variable GOPROXY_TEST_UNSET is not set"},
+		{HeaderValue{ValueEnv: "GOPROXY_TEST_EMPTY"}, "environment variable GOPROXY_TEST_EMPTY is empty"},
+		{HeaderValue{ValueEnv: "GOPROXY_TEST_NEWLINE"}, "environment variable GOPROXY_TEST_NEWLINE contains a line break"},
+		{HeaderValue{ValueFile: twoLines}, twoLines + " contains a line break"},
+		{HeaderValue{ValueFile: empty}, empty + " is empty"},
+		{HeaderValue{ValueFile: filepath.Join(dir, "missing")}, "no such file"},
+	}
+	for _, test := range tests {
+		_, err := test.value.Resolve()
+		if err == nil {
+			t.Errorf("%+v resolved, want an error containing %q", test.value, test.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%+v: error = %q, want it to contain %q", test.value, err, test.want)
+		}
+		// the error says where to look, never what was found
+		for _, secret := range []string{"a-secret", "first-secret", "second-secret"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("%+v: error %q gives the secret away", test.value, err)
+			}
+		}
+	}
+}
+
+func TestHeaderValueErrors(t *testing.T) {
+	tests := []struct{ name, set, want string }{
+		{"unknown key", `{ X-Key: { value_evn: KEY } }`, "field value_evn not found in type config.HeaderValue"},
+		{"repeated key", `{ X-Key: { value_env: A, value_env: B } }`, `mapping key "value_env" already defined`},
+		{"two sources", `{ X-Key: { value_env: A, value_file: /etc/hostname } }`,
+			"rules[0] (api).proxy.request_headers.set.X-Key: value, value_env and value_file are mutually exclusive"},
+		{"no source", `{ X-Key: { prefix: "Bearer " } }`,
+			"rules[0] (api).proxy.request_headers.set.X-Key: one of value, value_env or value_file is required"},
+		{"missing file", `{ X-Key: { value_file: /does/not/exist } }`,
+			"rules[0] (api).proxy.request_headers.set.X-Key.value_file: does not exist: /does/not/exist"},
+		{"a list", `{ X-Key: [a, b] }`, "a header value must be a string, or a mapping"},
+		{"a source of the wrong type", `{ X-Key: { value_env: [A] } }`, "cannot unmarshal"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse([]byte(`
+version: 2
+listeners:
+  http: { addr: ":8080" }
+rules:
+  - name: api
+    proxy:
+      url: "http://127.0.0.1:8081"
+      request_headers:
+        set: ` + test.set + `
+`))
+			if err == nil {
+				t.Fatalf("accepted, want an error containing %q", test.want)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("error = %q, want it to contain %q", err, test.want)
+			}
+		})
+	}
+
+	// response headers take the same forms
+	_, err := Parse([]byte(`
+version: 2
+listeners:
+  http: { addr: ":8080" }
+rules:
+  - proxy:
+      url: "http://127.0.0.1:8081"
+      response_headers:
+        set: { X-Key: { value_file: /does/not/exist } }
+`))
+	if err == nil || !strings.Contains(err.Error(), "rules[0].proxy.response_headers.set.X-Key.value_file: does not exist") {
+		t.Errorf("response_headers error = %v", err)
+	}
+}
+
 func TestParseByteSize(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -444,6 +688,16 @@ func TestParseLevel(t *testing.T) {
 // returns either a usable config or an error - never a panic.
 func FuzzParse(f *testing.F) {
 	f.Add(minimal)
+	f.Add(`
+version: 2
+listeners:
+  http: { addr: ":8080" }
+rules:
+  - proxy:
+      url: "http://127.0.0.1:8081"
+      request_headers:
+        set: { X-Env: prod, Authorization: { prefix: "Bearer ", value_env: KEY } }
+`)
 	f.Add("version: 2\nrules: []\n")
 	f.Add("]] not yaml [[")
 	f.Add("")

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httputil"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,8 +32,8 @@ type Proxy struct {
 	log     *slog.Logger
 	metrics *observe.Metrics
 
-	removeRequest  []*regexp.Regexp
-	removeResponse []*regexp.Regexp
+	requestHeaders  *headerRewrite
+	responseHeaders *headerRewrite
 }
 
 // ProxyDeps are what the proxy action needs from the process.
@@ -50,11 +52,11 @@ func NewProxy(cfg *config.Proxy, pool *upstream.Pool, deps ProxyDeps) (*Proxy, e
 		metrics: deps.Metrics,
 	}
 	var err error
-	if action.removeRequest, err = compileRemovals(cfg.RequestHeaders); err != nil {
-		return nil, fmt.Errorf("request_headers.remove: %w", err)
+	if action.requestHeaders, err = compileHeaders(cfg.RequestHeaders); err != nil {
+		return nil, fmt.Errorf("request_headers.%w", err)
 	}
-	if action.removeResponse, err = compileRemovals(cfg.ResponseHeaders); err != nil {
-		return nil, fmt.Errorf("response_headers.remove: %w", err)
+	if action.responseHeaders, err = compileHeaders(cfg.ResponseHeaders); err != nil {
+		return nil, fmt.Errorf("response_headers.%w", err)
 	}
 	trusted := deps.Trusted
 
@@ -85,13 +87,11 @@ func NewProxy(cfg *config.Proxy, pool *upstream.Pool, deps ProxyDeps) (*Proxy, e
 			}
 			setPath(request.Out.URL, path)
 
-			applyHeaders(request.Out.Header, cfg.RequestHeaders, action.removeRequest)
+			action.requestHeaders.apply(request.Out.Header)
 		},
 		Transport: &retryingTransport{action: action},
 		ModifyResponse: func(response *http.Response) error {
-			if cfg.ResponseHeaders != nil {
-				applyHeaders(response.Header, cfg.ResponseHeaders, action.removeResponse)
-			}
+			action.responseHeaders.apply(response.Header)
 			return nil
 		},
 		ErrorLog: slog.NewLogLogger(deps.Log.Handler(), slog.LevelError),
@@ -232,30 +232,54 @@ func copyForwarded(dst, src http.Header) {
 	}
 }
 
-func compileRemovals(headers *config.Headers) ([]*regexp.Regexp, error) {
-	if headers == nil {
+// headerRewrite is a request_headers or response_headers block made ready for
+// the request path: removal patterns compiled, and every value to set already
+// read from the environment or its file, so that nothing is resolved per
+// request and a value that cannot be resolved stops startup instead.
+type headerRewrite struct {
+	remove []string
+	// patterns parallels remove: the compiled expression, or nil for a name
+	patterns []*regexp.Regexp
+	set      map[string]string
+}
+
+func compileHeaders(cfg *config.Headers) (*headerRewrite, error) {
+	if cfg == nil {
 		return nil, nil
 	}
-	compiled := make([]*regexp.Regexp, len(headers.Remove))
-	for i, name := range headers.Remove {
+	rewrite := &headerRewrite{
+		remove:   cfg.Remove,
+		patterns: make([]*regexp.Regexp, len(cfg.Remove)),
+		set:      make(map[string]string, len(cfg.Set)),
+	}
+	for i, name := range cfg.Remove {
 		if !strings.HasPrefix(name, "^") {
 			continue
 		}
 		expression, err := regexp.Compile(name)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("remove[%d]: %w", i, err)
 		}
-		compiled[i] = expression
+		rewrite.patterns[i] = expression
 	}
-	return compiled, nil
+	// sorted, so that of two broken values the same one is reported each time
+	for _, name := range slices.Sorted(maps.Keys(cfg.Set)) {
+		resolved, err := cfg.Set[name].Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("set.%s: %w", name, err)
+		}
+		rewrite.set[name] = resolved
+	}
+	return rewrite, nil
 }
 
-func applyHeaders(header http.Header, cfg *config.Headers, removals []*regexp.Regexp) {
-	if cfg == nil {
+// apply removes, then sets. A nil rewrite changes nothing.
+func (h *headerRewrite) apply(header http.Header) {
+	if h == nil {
 		return
 	}
-	for i, name := range cfg.Remove {
-		if expression := removals[i]; expression != nil {
+	for i, name := range h.remove {
+		if expression := h.patterns[i]; expression != nil {
 			for existing := range header {
 				if expression.MatchString(existing) {
 					header.Del(existing)
@@ -265,7 +289,7 @@ func applyHeaders(header http.Header, cfg *config.Headers, removals []*regexp.Re
 		}
 		header.Del(name)
 	}
-	for name, value := range cfg.Set {
+	for name, value := range h.set {
 		header.Set(name, value)
 	}
 }

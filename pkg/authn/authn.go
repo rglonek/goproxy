@@ -7,8 +7,6 @@ package authn
 import (
 	"fmt"
 	"net/http"
-	"os"
-	"strings"
 
 	"goproxy/pkg/config"
 )
@@ -168,33 +166,4 @@ func (c *Chain) Methods() []string {
 		methods = append(methods, authenticator.Method())
 	}
 	return methods
-}
-
-// resolveSecret reads a secret from the config, an environment variable or a
-// file. Reading it here means the config file itself does not have to hold it.
-func resolveSecret(literal, fromEnv, fromFile string) (string, error) {
-	switch {
-	case literal != "":
-		return literal, nil
-	case fromEnv != "":
-		value, ok := os.LookupEnv(fromEnv)
-		if !ok {
-			return "", fmt.Errorf("environment variable %s is not set", fromEnv)
-		}
-		if value == "" {
-			return "", fmt.Errorf("environment variable %s is empty", fromEnv)
-		}
-		return value, nil
-	case fromFile != "":
-		content, err := os.ReadFile(fromFile)
-		if err != nil {
-			return "", err
-		}
-		value := strings.TrimRight(string(content), "\r\n")
-		if value == "" {
-			return "", fmt.Errorf("%s is empty", fromFile)
-		}
-		return value, nil
-	}
-	return "", fmt.Errorf("no value configured")
 }
