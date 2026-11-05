@@ -359,7 +359,7 @@ GET http://api.example.com/apifoo
 
 ## Building
 
-Go 1.25 or newer. `go.mod` pins the toolchain to a patched release, so a build
+Go 1.26 or newer. `go.mod` pins the toolchain to a patched release, so a build
 on an older Go fetches that toolchain rather than linking a stdlib with known
 advisories in `crypto/tls`, `crypto/x509` and `net/http`:
 
@@ -401,7 +401,7 @@ goproxy-1.0.0/
 ```bash
 tar -xzf goproxy-1.0.0-linux-amd64.tar.gz
 cd goproxy-1.0.0
-./goproxy -version      # goproxy version 1.0.0, commit abc1234, built ..., go1.25.12
+./goproxy -version      # goproxy version 1.0.0, commit abc1234, built ..., go1.27.3
 ./goproxy -config config-examples/01-reverse-proxy.yaml -check
 ```
 

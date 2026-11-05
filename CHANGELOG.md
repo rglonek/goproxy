@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Security
+
+* Built with Go 1.27.3 and `golang.org/x/net` v0.62.0 (also `x/crypto` v0.58.0,
+  `x/text` v0.43.0). The pinned Go 1.25.12 toolchain and `x/net` v0.58.0 carried
+  GO-2026-6617, GO-2026-6613 and GO-2026-6612 in `net/http`, which the weekly
+  govulncheck run reported; Go 1.25 no longer gets those fixes, so the minimum
+  is now Go 1.26.
+
 ### Configuration
 
 * A `request_headers.set` or `response_headers.set` value can now be a mapping
