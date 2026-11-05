@@ -35,6 +35,10 @@ const (
 
 	DefaultPassiveFailures = 3
 	DefaultRetryBudget     = 0.1
+
+	// DefaultTokenHeader is where a token is read from when the auth block
+	// does not say.
+	DefaultTokenHeader = "X-TOKEN"
 )
 
 // Path match modes.
@@ -214,6 +218,9 @@ type BasicAuth struct {
 	Realm string `yaml:"realm"`
 	// forward_user_header: send the authenticated user upstream in this header
 	ForwardUserHeader string `yaml:"forward_user_header"`
+	// forward_groups_header: send the authenticated user's groups upstream in
+	// this header, comma-separated
+	ForwardGroupsHeader string `yaml:"forward_groups_header"`
 	// forward_user_query: send the authenticated user upstream in this query
 	// parameter
 	ForwardUserQuery string `yaml:"forward_user_query"`
@@ -230,6 +237,9 @@ type User struct {
 	Password     string `yaml:"password"`
 	PasswordHash string `yaml:"password_hash"`
 	PasswordFile string `yaml:"password_file"`
+	// groups: what a rule's allow.groups matches, and what
+	// forward_groups_header sends upstream
+	Groups []string `yaml:"groups"`
 }
 
 type TokenAuth struct {
@@ -250,6 +260,8 @@ type Token struct {
 	Value     string `yaml:"value"`
 	ValueEnv  string `yaml:"value_env"`
 	ValueFile string `yaml:"value_file"`
+	// groups: what a rule's allow.groups matches
+	Groups []string `yaml:"groups"`
 }
 
 // ForwardAuth delegates the decision to another service: goproxy issues a
@@ -266,6 +278,9 @@ type ForwardAuth struct {
 	CopyHeaders []string `yaml:"copy_headers"`
 	// user_header: header of the auth response carrying the authenticated user
 	UserHeader string `yaml:"user_header"`
+	// groups_header: header of the auth response carrying the user's groups,
+	// comma-separated
+	GroupsHeader string `yaml:"groups_header"`
 }
 
 // Upstream is a set of targets plus how to choose between them.
@@ -326,6 +341,9 @@ type Rule struct {
 	Match Match  `yaml:"match"`
 	// auth: the name of an entry in the top-level auth block
 	Auth string `yaml:"auth"`
+	// allow: which of the identities auth accepts may use the rule; anyone
+	// else gets 403. Absent means everyone auth accepts.
+	Allow *Allow `yaml:"allow"`
 	// allow_ips/deny_ips: CIDRs or addresses, evaluated before auth
 	AllowIPs []string `yaml:"allow_ips"`
 	DenyIPs  []string `yaml:"deny_ips"`
@@ -341,6 +359,16 @@ type Rule struct {
 	Serve    *Serve    `yaml:"serve"`
 	Redirect *Redirect `yaml:"redirect"`
 	Respond  *Respond  `yaml:"respond"`
+}
+
+// Allow limits a rule to some of the identities its auth block accepts. An
+// identity is allowed when it is one of the users or has one of the groups.
+type Allow struct {
+	// users: user names, as the access log's auth_user shows them - a basic
+	// user, the user a forward-auth service named, or a token's id
+	Users []string `yaml:"users"`
+	// groups: group names from basic users, tokens or a forward-auth service
+	Groups []string `yaml:"groups"`
 }
 
 type Match struct {

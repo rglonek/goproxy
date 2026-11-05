@@ -475,13 +475,16 @@ func CORS(cfg *config.CORS) Middleware {
 
 // Authenticate runs a rule's authenticator chain. Credentials goproxy consumed
 // are stripped whether or not they were accepted, so a rejected token is never
-// forwarded upstream when another authenticator rescues the request.
+// forwarded upstream when another authenticator rescues the request. Before
+// any of that, a client's copies of the headers that say who it is are
+// removed, so the only such header the backend can see is goproxy's.
 func Authenticate(chain *authn.Chain, rule string, metrics *observe.Metrics, log *slog.Logger) Middleware {
 	if chain.Empty() {
 		return nil
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			chain.StripIdentity(r)
 			identity, ok := chain.Authenticate(r)
 			chain.Strip(r)
 			if !ok {
@@ -515,6 +518,36 @@ func Authenticate(chain *authn.Chain, rule string, metrics *observe.Metrics, log
 					query.Set(name, value)
 				}
 				r.URL.RawQuery = query.Encode()
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// Authorize refuses an authenticated client that the rule's allow list does
+// not name, with 403: the client proved who it is, so asking it for
+// credentials again (401 and a challenge) would only prompt a retry that
+// cannot succeed. It runs after Authenticate, which records the identity.
+func Authorize(allow *authn.Allowlist, rule string, metrics *observe.Metrics, log *slog.Logger) Middleware {
+	if allow == nil {
+		return nil
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			identity := Identity(r)
+			if !allow.Allows(identity) {
+				if metrics != nil {
+					metrics.AuthForbidden.Inc(rule, identity.Method)
+				}
+				// who was refused, never with what: the identity holds no
+				// credential, only the user name or token id
+				log.Info("authorization failed", "rule", rule, "client_ip", ClientIP(r),
+					"method", identity.Method, "user", identity.Subject(), "id", IDOf(r))
+				if state := StateOf(r); state != nil {
+					state.Err = "forbidden"
+				}
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
 			}
 			next.ServeHTTP(w, r)
 		})

@@ -338,6 +338,197 @@ rules:
   - name: api
     proxy: {}
 `, "(api)"},
+		{"allow without auth", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+rules:
+  - name: open
+    allow: { users: [alice] }
+    respond: { status: 200, body: ok }
+`, "rules[0] (open).allow: requires auth"},
+		{"allow with neither list", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x }]
+rules:
+  - auth: staff
+    allow: {}
+    respond: { status: 200, body: ok }
+`, "allow: at least one of users or groups is required"},
+		// commenting out every entry leaves a null allow, which the decoder
+		// would otherwise read as no allow at all: everyone through
+		{"allow with nothing under it", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x }]
+rules:
+  - name: admin
+    auth: staff
+    allow:
+      # groups: [admin]
+    respond: { status: 200, body: ok }
+`, "rules[0] (admin).allow: is empty"},
+		{"allow with an empty user list", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x, groups: [admin] }]
+rules:
+  - auth: staff
+    allow: { users: [], groups: [admin] }
+    respond: { status: 200, body: ok }
+`, "allow.users: is empty"},
+		{"allow with an empty group list", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x }]
+rules:
+  - auth: staff
+    allow: { users: [alice], groups: [] }
+    respond: { status: 200, body: ok }
+`, "allow.groups: is empty"},
+		{"allow naming a user the auth block does not have", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x }]
+rules:
+  - auth: staff
+    allow: { users: [alcie] }
+    respond: { status: 200, body: ok }
+`, `allow.users[0]: auth block "staff" has no user or token named "alcie" (did you mean "alice"?)`},
+		{"allow naming a group nobody has", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x, groups: [owner] }]
+rules:
+  - auth: staff
+    allow: { groups: [onwer] }
+    respond: { status: 200, body: ok }
+`, `allow.groups[0]: no user or token in auth block "staff" has group "onwer" (did you mean "owner"?)`},
+		{"group with a comma", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x, groups: ["owner,guest"] }]
+rules:
+  - respond: { status: 200, body: ok }
+`, "basic.users[0].groups[0]: \"owner,guest\" must be printable ASCII with no comma or space"},
+		{"empty group", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  api:
+    token:
+      tokens: [{ id: ci, value: x, groups: [""] }]
+rules:
+  - respond: { status: 200, body: ok }
+`, "token.tokens[0].groups[0]: must not be empty"},
+		{"group listed twice", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x, groups: [owner, owner] }]
+rules:
+  - respond: { status: 200, body: ok }
+`, `"owner" appears twice`},
+		{"user and groups in one header", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x }]
+      forward_user_header: X-User
+      forward_groups_header: x-user
+rules:
+  - respond: { status: 200, body: ok }
+`, "basic.forward_groups_header: \"x-user\" is already forward_user_header"},
+		// the client's copy of an identity header is removed before
+		// authentication, so one that carries a credential would lock
+		// everyone out
+		{"identity header that carries the basic credential", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x }]
+      forward_user_header: Authorization
+rules:
+  - respond: { status: 200, body: ok }
+`, "basic.forward_user_header: \"Authorization\" is where basic reads a credential from"},
+		{"identity header that carries the token", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    token:
+      tokens: [{ value: x }]
+    basic:
+      users: [{ user: alice, password: x }]
+      forward_groups_header: X_Token
+rules:
+  - respond: { status: 200, body: ok }
+`, "is where token reads a credential from"},
+		{"identity header the auth service is sent", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  sso:
+    forward:
+      url: "http://127.0.0.1:9000/auth"
+      request_headers: [Cookie, X-Auth-User]
+      user_header: X-Auth-User
+rules:
+  - respond: { status: 200, body: ok }
+`, "forward.user_header: \"X-Auth-User\" is where forward.request_headers reads a credential from"},
+		{"hop-by-hop identity header", `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  staff:
+    basic:
+      users: [{ user: alice, password: x }]
+      forward_groups_header: Connection
+rules:
+  - respond: { status: 200, body: ok }
+`, "hop-by-hop"},
 	}
 
 	for _, test := range tests {
@@ -350,6 +541,69 @@ rules:
 				t.Fatalf("error = %v, want it to contain %q", err, test.errContains)
 			}
 		})
+	}
+}
+
+func TestParseGroupsAndAllow(t *testing.T) {
+	cfg, err := Parse([]byte(`
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  people:
+    token:
+      tokens: [{ id: ci, value: x, groups: [deploy] }]
+    basic:
+      users:
+        - { user: robert, password: x, groups: [owner] }
+        - { user: gina, password: y, groups: [guest] }
+      forward_user_header: X-Alice-User
+      forward_groups_header: X-Alice-Role
+  sso:
+    forward:
+      url: "http://127.0.0.1:9000/auth"
+      user_header: X-Auth-User
+      groups_header: X-Auth-Groups
+rules:
+  - name: owner
+    auth: people
+    allow: { groups: [owner] }
+    respond: { status: 200, body: ok }
+  - name: named
+    auth: people
+    allow: { users: [gina, ci], groups: [guest, deploy] }
+    respond: { status: 200, body: ok }
+  # a forward-auth service can name any user and any group
+  - name: sso
+    auth: sso
+    allow: { users: [whoever], groups: [anything] }
+    respond: { status: 200, body: ok }
+`))
+	if err != nil {
+		t.Fatalf("config does not load: %v", err)
+	}
+	if got := cfg.Auth["people"].Basic.Users[0].Groups; len(got) != 1 || got[0] != "owner" {
+		t.Errorf("groups = %v", got)
+	}
+	if got := cfg.Auth["people"].Basic.ForwardGroupsHeader; got != "X-Alice-Role" {
+		t.Errorf("forward_groups_header = %q", got)
+	}
+	if got := cfg.Auth["sso"].Forward.GroupsHeader; got != "X-Auth-Groups" {
+		t.Errorf("groups_header = %q", got)
+	}
+	if allow := cfg.Rules[1].Allow; allow == nil || len(allow.Users) != 2 || len(allow.Groups) != 2 {
+		t.Errorf("allow = %+v", allow)
+	}
+	if cfg.Rules[0].Allow.Users != nil {
+		t.Errorf("users = %v, want none", cfg.Rules[0].Allow.Users)
+	}
+}
+
+func TestIdentityHeaderKey(t *testing.T) {
+	for _, name := range []string{"X-Alice-User", "x-alice-user", "X_ALICE_USER", "x_Alice-user"} {
+		if got := IdentityHeaderKey(name); got != "x-alice-user" {
+			t.Errorf("IdentityHeaderKey(%q) = %q", name, got)
+		}
 	}
 }
 

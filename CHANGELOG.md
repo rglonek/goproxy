@@ -12,6 +12,19 @@
 
 ### Configuration
 
+* Basic users and tokens can carry `groups`, and a forward-auth service can
+  report them in `forward.groups_header` (comma-separated). A new
+  `basic.forward_groups_header` sends a basic user's groups upstream,
+  comma-joined with no spaces (`X-Role: owner,guest`) and set rather than
+  added; a user with no groups gets no header.
+* A rule with `auth` can narrow who may use it with
+  `allow: { users: [...], groups: [...] }`. An authenticated identity that is
+  none of the users (a basic user, a forward-auth user or a token's id) and has
+  none of the groups gets `403 Forbidden`, with no `WWW-Authenticate`
+  challenge. Without `allow` nothing changes. `-check` refuses `allow` without
+  `auth`, an `allow` with no list, an empty list or nothing under it, and a
+  user or group that no user or token in the auth block has, suggesting the
+  name you probably meant. `explain` prints the list a matching rule applies.
 * A `request_headers.set` or `response_headers.set` value can now be a mapping
   that reads it from `value_env` or `value_file`, with an optional `prefix`, so
   a key goproxy sends to a backend does not have to sit in the config file:
@@ -22,8 +35,39 @@
   reload reads the file again. A value containing a line break is refused
   rather than failing every request.
 
+### Security
+
+* The headers that tell a backend who the client is can no longer come from
+  the client. On a rule whose auth block declares `basic.forward_user_header`,
+  `basic.forward_groups_header`, `basic.forward_user_query`, or a forward-auth
+  `user_header` or `groups_header`, whatever the client sent under that name
+  is removed before authentication - every copy, in any case, and spelled with
+  `_` for `-`, which CGI-style servers read as the same header - whether or not
+  authentication then sets it. Before, the client's value reached the backend
+  whenever the authenticator that accepted the request did not set one (a
+  token winning over basic), an `X_User` spelling always did, and a
+  forward-auth service was sent it. A forward-auth service's
+  `copy_headers` are removed from the client's request once the service has
+  answered (one may be the credential it reads), so a header it did not answer
+  with no longer reaches the backend as the client's.
+* A client's `Connection: X-User` no longer removes the identity goproxy set.
+  The proxy drops every header the client's `Connection` names, which took
+  goproxy's own `forward_user_header` with it; identity headers are now set
+  again after that, as `request_headers.set` already was.
+* An identity header that is also where the same auth block reads a credential
+  (`Authorization` with basic or bearer tokens, the token header, a forward
+  `request_headers` entry) is a config error, since removing the client's copy
+  would lock everyone out.
+* A rule without `auth` still passes these headers through like any other; if
+  it reaches a backend that trusts them, remove them with
+  `request_headers.remove`.
+
 ### Observability
 
+* `goproxy_auth_forbidden_total{rule,method}` counts requests an `allow` list
+  refused. Each is logged at `info` as `authorization failed`, with the rule,
+  the user name or token id and the client address, never a credential, and
+  the access log records it with `"error":"forbidden"`.
 * `GET /config` now redacts header values as well: the literal value of any
   header in `request_headers.set`, `response_headers.set` or `respond.headers`
   whose name marks it as a credential (`Authorization`, `Cookie`, `Set-Cookie`,
@@ -33,6 +77,11 @@
 
 ### Library
 
+* `authn.Identity` has `Groups`. `authn.Allowlist` and `middleware.Authorize`
+  are the allow stage, `authn.Chain.StripIdentity` removes a client's identity
+  headers, and `config.IdentityHeaderKey` is the header-name folding both
+  sides use. `config.DefaultTokenHeader` is the default token header, which
+  `authn.DefaultTokenHeader` now refers to.
 * `config.Headers.Set` is a `map[string]config.HeaderValue` rather than a
   `map[string]string`; a plain value is `config.HeaderValue{Value: "..."}`.
   `config.ResolveSecret` is the env/file lookup that token, password and header

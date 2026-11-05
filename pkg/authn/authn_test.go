@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -243,5 +244,178 @@ func TestEmptyChainAllowsEverything(t *testing.T) {
 	}
 	if _, ok := c.Authenticate(httptest.NewRequest("GET", "/", nil)); !ok {
 		t.Error("a nil chain refused a request")
+	}
+}
+
+func TestGroups(t *testing.T) {
+	c := chain(t, &config.Auth{
+		Token: &config.TokenAuth{Tokens: []config.Token{{ID: "ci", Value: "t0ken", Groups: []string{"deploy"}}}},
+		Basic: &config.BasicAuth{
+			Users: []config.User{
+				{User: "robert", Password: "pw", Groups: []string{"owner", "guest"}},
+				{User: "nobody", Password: "pw"},
+			},
+			ForwardUserHeader:   "X-Alice-User",
+			ForwardGroupsHeader: "X-Alice-Role",
+		},
+	})
+
+	request := httptest.NewRequest("GET", "/", nil)
+	request.SetBasicAuth("robert", "pw")
+	identity, ok := c.Authenticate(request)
+	if !ok {
+		t.Fatal("robert was refused")
+	}
+	if len(identity.Groups) != 2 || identity.Groups[0] != "owner" || identity.Groups[1] != "guest" {
+		t.Errorf("groups = %v", identity.Groups)
+	}
+	// comma-joined, no spaces, and one value: set rather than added
+	if got := identity.Headers.Values("X-Alice-Role"); len(got) != 1 || got[0] != "owner,guest" {
+		t.Errorf("X-Alice-Role = %q", got)
+	}
+
+	// a user with no groups gets no header rather than an empty one
+	request = httptest.NewRequest("GET", "/", nil)
+	request.SetBasicAuth("nobody", "pw")
+	identity, _ = c.Authenticate(request)
+	if _, present := identity.Headers["X-Alice-Role"]; present {
+		t.Errorf("X-Alice-Role = %q, want no header", identity.Headers.Get("X-Alice-Role"))
+	}
+
+	request = httptest.NewRequest("GET", "/", nil)
+	request.Header.Set("X-TOKEN", "t0ken")
+	identity, _ = c.Authenticate(request)
+	if len(identity.Groups) != 1 || identity.Groups[0] != "deploy" {
+		t.Errorf("token groups = %v", identity.Groups)
+	}
+}
+
+func TestForwardAuthGroups(t *testing.T) {
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-User", "carol")
+		w.Header().Add("X-Groups", "staff, ops")
+		w.Header().Add("X-Groups", "oncall,")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer service.Close()
+	c := chain(t, &config.Auth{Forward: &config.ForwardAuth{
+		URL: service.URL, UserHeader: "X-User", GroupsHeader: "X-Groups",
+	}})
+	identity, ok := c.Authenticate(httptest.NewRequest("GET", "/", nil))
+	if !ok {
+		t.Fatal("refused")
+	}
+	if got := strings.Join(identity.Groups, "|"); got != "staff|ops|oncall" {
+		t.Errorf("groups = %q, want the comma-separated values of every header line", got)
+	}
+}
+
+// What a client sends in a header goproxy fills in from the identity is
+// removed, in every spelling a backend might read as the same header.
+func TestStripIdentity(t *testing.T) {
+	c := chain(t, &config.Auth{
+		Token: &config.TokenAuth{Tokens: []config.Token{{ID: "ci", Value: "t0ken"}}},
+		Basic: &config.BasicAuth{
+			Users:               []config.User{{User: "robert", Password: "pw"}},
+			ForwardUserHeader:   "X-Alice-User",
+			ForwardGroupsHeader: "X-Alice-Role",
+			ForwardUserQuery:    "user",
+		},
+	})
+
+	request := httptest.NewRequest("GET", "/?b=2&user=robert&a=%201&us%65r=x", nil)
+	request.Header.Add("X-Alice-User", "robert")
+	request.Header.Add("X-Alice-User", "robert")
+	request.Header["x-alice-role"] = []string{"owner"} // not canonical, as a client might build it
+	request.Header["X_Alice_User"] = []string{"robert"}
+	request.Header.Set("X-Other", "kept")
+	request.Header.Set("X-TOKEN", "t0ken")
+
+	c.StripIdentity(request)
+	for name := range request.Header {
+		if config.IdentityHeaderKey(name) == "x-alice-user" || config.IdentityHeaderKey(name) == "x-alice-role" {
+			t.Errorf("%s survived: %q", name, request.Header[name])
+		}
+	}
+	if request.Header.Get("X-Other") != "kept" || request.Header.Get("X-TOKEN") != "t0ken" {
+		t.Errorf("an unrelated header was removed: %v", request.Header)
+	}
+	// the parameters that stay keep the client's order and encoding
+	if got := request.URL.RawQuery; got != "b=2&a=%201" {
+		t.Errorf("query = %q", got)
+	}
+
+	// the token wins, and basic's headers are not set: the backend gets none
+	// at all, not the client's
+	identity, ok := c.Authenticate(request)
+	if !ok || identity.Method != MethodToken || len(identity.Headers) != 0 {
+		t.Fatalf("identity = %+v, ok = %v", identity, ok)
+	}
+}
+
+// copy_headers are removed in Strip, after the auth service has seen them:
+// one of them may be the credential the service reads.
+func TestForwardAuthCopyHeadersAreStrippedAfterTheServiceAnswers(t *testing.T) {
+	var sawAuthorization, sawUser string
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuthorization = r.Header.Get("Authorization")
+		sawUser = r.Header.Get("X-Auth-User")
+		w.WriteHeader(http.StatusOK) // and answers with neither header
+	}))
+	defer service.Close()
+	c := chain(t, &config.Auth{Forward: &config.ForwardAuth{
+		URL: service.URL, UserHeader: "X-Auth-User", CopyHeaders: []string{"Authorization", "X-Auth-Email"},
+	}})
+
+	request := httptest.NewRequest("GET", "/", nil)
+	request.Header.Set("Authorization", "Bearer client")
+	request.Header.Set("X-Auth-User", "spoofed")
+	request.Header.Set("X-Auth-Email", "spoofed@example.com")
+	c.StripIdentity(request)
+	identity, ok := c.Authenticate(request)
+	c.Strip(request)
+	if !ok {
+		t.Fatal("refused")
+	}
+	if sawAuthorization != "Bearer client" {
+		t.Errorf("the auth service saw Authorization %q, want the client's", sawAuthorization)
+	}
+	if sawUser != "" {
+		t.Errorf("the auth service saw the client's X-Auth-User %q", sawUser)
+	}
+	for _, name := range []string{"Authorization", "X-Auth-User", "X-Auth-Email"} {
+		if got := request.Header.Get(name); got != "" {
+			t.Errorf("the client's %s survived: %q", name, got)
+		}
+	}
+	if identity.User != "" || len(identity.Headers) != 0 {
+		t.Errorf("identity = %+v, want nothing the service did not say", identity)
+	}
+}
+
+func TestAllowlist(t *testing.T) {
+	list := NewAllowlist(&config.Allow{Users: []string{"robert", "ci"}, Groups: []string{"guest"}})
+	tests := []struct {
+		name     string
+		identity Identity
+		want     bool
+	}{
+		{"listed user", Identity{Method: MethodBasic, User: "robert"}, true},
+		{"token by its id", Identity{Method: MethodToken, TokenID: "ci"}, true},
+		{"listed group", Identity{Method: MethodBasic, User: "gina", Groups: []string{"viewer", "guest"}}, true},
+		{"neither", Identity{Method: MethodBasic, User: "vic", Groups: []string{"viewer"}}, false},
+		{"not authenticated", Identity{User: "robert"}, false},
+	}
+	for _, test := range tests {
+		if got := list.Allows(test.identity); got != test.want {
+			t.Errorf("%s: allows = %v, want %v", test.name, got, test.want)
+		}
+	}
+	if got := list.String(); got != "users robert, ci; groups guest" {
+		t.Errorf("String() = %q", got)
+	}
+	var none *Allowlist
+	if !none.Allows(Identity{}) {
+		t.Error("no allow block refused a request")
 	}
 }

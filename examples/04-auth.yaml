@@ -32,7 +32,7 @@ auth:
         # - user: "carol"
         #   password_file: "/etc/goproxy/carol.pw"
       realm: "Internal"
-      forward_user_header: "X-USER" # the backend receives X-USER: alice
+      forward_user_header: "X-USER" # the backend receives X-USER: alice, never a client's own X-USER
 
   # static tokens, for scripts and CI
   api:

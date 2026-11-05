@@ -297,6 +297,9 @@ func (a *Auth) validate() error {
 					return fmt.Errorf("basic.users[%d].password_file: %w", i, err)
 				}
 			}
+			if err := validateGroups(user.Groups); err != nil {
+				return fmt.Errorf("basic.users[%d].groups%w", i, err)
+			}
 		}
 	}
 	if a.Token != nil {
@@ -328,11 +331,159 @@ func (a *Auth) validate() error {
 					return fmt.Errorf("token.tokens[%d].value_file: %w", i, err)
 				}
 			}
+			if err := validateGroups(token.Groups); err != nil {
+				return fmt.Errorf("token.tokens[%d].groups%w", i, err)
+			}
 		}
 	}
 	if a.Forward != nil {
 		if err := absoluteURL(a.Forward.URL); err != nil {
 			return fmt.Errorf("forward.url: %w", err)
+		}
+	}
+	return a.validateIdentityHeaders()
+}
+
+// validateGroups checks group names. They are sent upstream comma-separated,
+// so a name cannot hold a comma, and one with a space or a control character
+// in it is a typo that allow would never match.
+func validateGroups(groups []string) error {
+	seen := map[string]bool{}
+	for i, group := range groups {
+		if group == "" {
+			return fmt.Errorf("[%d]: must not be empty", i)
+		}
+		if strings.ContainsFunc(group, func(r rune) bool { return r < '!' || r > '~' || r == ',' }) {
+			return fmt.Errorf("[%d]: %q must be printable ASCII with no comma or space", i, group)
+		}
+		if seen[group] {
+			return fmt.Errorf("[%d]: %q appears twice", i, group)
+		}
+		seen[group] = true
+	}
+	return nil
+}
+
+// IdentityHeaderKey folds a header name the way a backend might read it:
+// case-insensitively, and with "_" and "-" the same, because CGI-style servers
+// turn X-User and X_User into one variable (HTTP_X_USER).
+func IdentityHeaderKey(name string) string {
+	return strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+}
+
+// validateIdentityHeaders checks the headers that say who the client is. A
+// client's copy of each is removed before authentication, so one that is also
+// where a credential is read from would lock everyone out.
+func (a *Auth) validateIdentityHeaders() error {
+	credentials := map[string]string{}
+	if a.Basic != nil {
+		credentials["authorization"] = "basic"
+	}
+	if a.Token != nil {
+		header := a.Token.Header
+		if header == "" {
+			header = DefaultTokenHeader
+		}
+		credentials[IdentityHeaderKey(header)] = "token"
+		if a.Token.AcceptBearer == nil || *a.Token.AcceptBearer {
+			credentials["authorization"] = "token"
+		}
+	}
+	type identityHeader struct {
+		field string // where it is configured, for the error
+		name  string
+		sent  bool // goproxy sends it upstream itself
+	}
+	var identity []identityHeader
+	if a.Basic != nil {
+		identity = append(identity,
+			identityHeader{"basic.forward_user_header", a.Basic.ForwardUserHeader, true},
+			identityHeader{"basic.forward_groups_header", a.Basic.ForwardGroupsHeader, true})
+		if a.Basic.ForwardUserHeader != "" && IdentityHeaderKey(a.Basic.ForwardUserHeader) == IdentityHeaderKey(a.Basic.ForwardGroupsHeader) {
+			return fmt.Errorf("basic.forward_groups_header: %q is already forward_user_header", a.Basic.ForwardGroupsHeader)
+		}
+	}
+	if a.Forward != nil {
+		for _, name := range a.Forward.RequestHeaders {
+			credentials[IdentityHeaderKey(name)] = "forward.request_headers"
+		}
+		// read from the auth service's answer, not sent upstream by name
+		identity = append(identity,
+			identityHeader{"forward.user_header", a.Forward.UserHeader, false},
+			identityHeader{"forward.groups_header", a.Forward.GroupsHeader, false})
+	}
+	for _, header := range identity {
+		if header.name == "" {
+			continue
+		}
+		if header.sent && slices.ContainsFunc(hopByHopHeaders, func(hop string) bool { return strings.EqualFold(hop, header.name) }) {
+			return fmt.Errorf("%s: %q is a hop-by-hop header and cannot be forwarded", header.field, header.name)
+		}
+		if reader, ok := credentials[IdentityHeaderKey(header.name)]; ok {
+			return fmt.Errorf("%s: %q is where %s reads a credential from, and a client's %s is removed before authentication",
+				header.field, header.name, reader, header.name)
+		}
+	}
+	return nil
+}
+
+// identities lists the user names and groups an auth block can produce, which
+// is what a rule's allow can name. A forward-auth service can report anyone,
+// so with a user_header (or groups_header) that list is nil: any name goes.
+func (a *Auth) identities() (users, groups []string) {
+	users, groups = []string{}, []string{}
+	if a.Basic != nil {
+		for _, user := range a.Basic.Users {
+			users = append(users, user.User)
+			groups = append(groups, user.Groups...)
+		}
+	}
+	if a.Token != nil {
+		for i, token := range a.Token.Tokens {
+			id := token.ID
+			if id == "" {
+				id = strconv.Itoa(i)
+			}
+			users = append(users, id)
+			groups = append(groups, token.Groups...)
+		}
+	}
+	if a.Forward != nil && a.Forward.UserHeader != "" {
+		users = nil
+	}
+	if a.Forward != nil && a.Forward.GroupsHeader != "" {
+		groups = nil
+	}
+	slices.Sort(groups)
+	return users, slices.Compact(groups)
+}
+
+func (a *Allow) validate(auth *Auth, authName string) error {
+	if a.Users == nil && a.Groups == nil {
+		return fmt.Errorf(": at least one of users or groups is required")
+	}
+	// an empty list allows nobody, which is never what writing it meant
+	if a.Users != nil && len(a.Users) == 0 {
+		return fmt.Errorf(".users: is empty; list at least one user or leave users out")
+	}
+	if a.Groups != nil && len(a.Groups) == 0 {
+		return fmt.Errorf(".groups: is empty; list at least one group or leave groups out")
+	}
+	if err := validateGroups(a.Groups); err != nil {
+		return fmt.Errorf(".groups%w", err)
+	}
+	users, groups := auth.identities()
+	for i, user := range a.Users {
+		if user == "" {
+			return fmt.Errorf(".users[%d]: must not be empty", i)
+		}
+		if users != nil && !slices.Contains(users, user) {
+			return fmt.Errorf(".users[%d]: auth block %q has no user or token named %q%s", i, authName, user, didYouMean(user, users))
+		}
+	}
+	for i, group := range a.Groups {
+		if groups != nil && !slices.Contains(groups, group) {
+			return fmt.Errorf(".groups[%d]: no user or token in auth block %q has group %q%s", i, authName, group, didYouMean(group, groups))
 		}
 	}
 	return nil
@@ -423,6 +574,14 @@ func (r *Rule) validate(c *Config) error {
 	if r.Auth != "" {
 		if _, ok := c.Auth[r.Auth]; !ok {
 			return fmt.Errorf("auth: no auth block named %q%s", r.Auth, didYouMean(r.Auth, sortedKeys(c.Auth)))
+		}
+	}
+	if r.Allow != nil {
+		if r.Auth == "" {
+			return fmt.Errorf("allow: requires auth, which is what says who the client is")
+		}
+		if err := r.Allow.validate(c.Auth[r.Auth], r.Auth); err != nil {
+			return fmt.Errorf("allow%w", err)
 		}
 	}
 	for i, cidr := range r.AllowIPs {

@@ -58,6 +58,7 @@ type Rule struct {
 
 	action action.Action
 	auth   *authn.Chain
+	allow  *authn.Allowlist
 	cfg    *config.Rule
 }
 
@@ -155,6 +156,7 @@ func compileRule(index int, cfg *config.Rule, whole *config.Config, routes *Rout
 		return nil, fmt.Errorf("match.path: %w", err)
 	}
 	rule.auth = chains[cfg.Auth]
+	rule.allow = authn.NewAllowlist(cfg.Allow)
 
 	switch {
 	case cfg.Proxy != nil:
@@ -201,7 +203,9 @@ func compileRule(index int, cfg *config.Rule, whole *config.Config, routes *Rout
 	if !byIdentity {
 		stages = append(stages, rateLimit)
 	}
-	stages = append(stages, middleware.Authenticate(rule.auth, rule.Name, deps.Metrics, deps.Log))
+	stages = append(stages,
+		middleware.Authenticate(rule.auth, rule.Name, deps.Metrics, deps.Log),
+		middleware.Authorize(rule.allow, rule.Name, deps.Metrics, deps.Log))
 	if byIdentity {
 		// keyed by who the client turned out to be, so it has to run once that
 		// is known

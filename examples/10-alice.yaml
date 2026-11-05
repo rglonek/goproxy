@@ -1,0 +1,108 @@
+# One app behind goproxy, with people in roles: goproxy signs each person in,
+# tells the backend who they are and in what role, and refuses a role a route
+# is not for. The backend here is Alice (an AI daemon on 127.0.0.1:8000), which
+# trusts two headers to say who is talking:
+#
+#   X-Alice-User: robert        the basic-auth user
+#   X-Alice-Role: owner         the user's groups, comma-separated
+#
+# goproxy alone sets those. On every rule below - each one has `auth: alice` -
+# whatever a client sends under either name, in any case or spelled with
+# underscores, is removed before authentication; a user with no groups gets no
+# role header rather than the client's. A rule without auth would pass them
+# through like any other header, so there is none here.
+#
+# The `allow` lists are defense in depth: Alice enforces the roles itself too.
+# A signed-in person whose group a rule does not list gets 403.
+#
+# Passwords are read from files, so this config holds none and a copy that was
+# never filled in does not start. Create them first (no trailing newline is
+# needed; one is dropped):
+#   sudo install -d -m 0750 /etc/goproxy/alice
+#   printf '%s' 'robert-password' | sudo tee /etc/goproxy/alice/robert.pw
+#   ./goproxy -config examples/10-alice.yaml -check
+# Basic auth sends the password with every request: in production put this on
+# an https listener (see 06-https.yaml and 07-lets-encrypt.yaml).
+
+version: 2
+
+listeners:
+  http:
+    addr: ":8080"
+
+defaults:
+  timeouts:
+    # a chat turn can think for minutes before the first byte of its answer;
+    # the default 30s would answer 502 while she is still composing
+    upstream_response_header: 10m
+
+auth:
+  alice:
+    basic:
+      realm: "Alice"
+      users:
+        - user: robert
+          password_file: /etc/goproxy/alice/robert.pw
+          groups: [owner]
+        - user: gina
+          password_file: /etc/goproxy/alice/gina.pw
+          groups: [guest]
+        - user: vic
+          password_file: /etc/goproxy/alice/vic.pw
+          groups: [viewer]
+        # or, to commit the config: password_hash from
+        #   htpasswd -nbB robert 'robert-password' | cut -d: -f2
+      forward_user_header: X-Alice-User # X-Alice-User: robert
+      forward_groups_header: X-Alice-Role # X-Alice-Role: owner
+
+# Rules are tried in order and the first match wins, so the owner-only rule
+# comes before the conversational one: /api/voice/select would otherwise match
+# its voice/.* and be open to guests.
+rules:
+  # live thoughts and state: everyone, viewers included
+  - name: events
+    match: { path: /api/events, path_mode: exact }
+    auth: alice
+    allow: { groups: [owner, guest, viewer] }
+    streaming: true # an event stream outlives the write timeout
+    proxy: &alice
+      url: "http://127.0.0.1:8000"
+      request_headers:
+        set:
+          # The person's basic credential stops here (basic.forward is off);
+          # Alice gets goproxy's API key instead. Better kept out of the file:
+          #   Authorization: { prefix: "Bearer ", value_env: ALICE_API_KEY }
+          #   Authorization: { prefix: "Bearer ", value_file: /etc/goproxy/alice/api.key }
+          Authorization: "Bearer CHANGE-ME"
+
+  - name: chat-stream
+    match: { path: '^/(api/chat/stream|v1/chat/completions)$', path_mode: regex }
+    auth: alice
+    allow: { groups: [owner, guest] }
+    streaming: true
+    proxy: *alice
+
+  - name: owner
+    match: { path: '^/api/(approvals/decide|stop|restart|reset|identity/.*|sleep|voice/select)$', path_mode: regex }
+    auth: alice
+    allow: { groups: [owner] }
+    proxy: *alice
+
+  - name: conversation
+    match: { path: '^/api/(chat|conversation|session/rotate|voice/.*)$', path_mode: regex }
+    auth: alice
+    allow: { groups: [owner, guest] }
+    # a whole turn (POST /api/chat) or a long synthesis can take longer than
+    # the 60s write timeout to answer
+    streaming: true
+    proxy: *alice
+
+  # everything else is for reading - /, /ui/, /api/state, /api/thoughts,
+  # /api/dreams, /api/goals, /api/health and the rest - by everyone. Only GET
+  # and HEAD: a POST to a route this file does not know about gets 405 rather
+  # than reaching Alice as a viewer.
+  - name: read
+    match: { methods: [GET, HEAD] }
+    auth: alice
+    allow: { groups: [owner, guest, viewer] }
+    proxy: *alice

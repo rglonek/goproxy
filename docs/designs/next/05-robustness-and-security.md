@@ -81,6 +81,16 @@ operator configured.
   `hash(user:pass)` with a short TTL, or the proxy becomes a CPU-bound
   bcrypt-per-request machine.
 * **Multiple users per rule** (S4) via a `users` list.
+* **Identity headers are goproxy's alone.** A backend trusts
+  `forward_user_header` and `forward_groups_header` to say who is calling, so a
+  client must not be able to supply or suppress them. On a rule whose auth
+  block declares one (or `forward_user_query`, or a forward-auth `user_header`
+  or `groups_header`), the client's copy is removed before authentication, in
+  any case and with `_` for `-`; a forward-auth service's `copy_headers` are
+  removed once it has answered, since one may be its credential; and the proxy
+  action sets the identity again after `Connection`-named headers are dropped.
+  Users and tokens carry `groups`, and a rule's `allow` list (users or groups)
+  answers anyone else the block accepted with `403`.
 * **Auth failures are rate-limited** per source IP, so the proxy is not a free
   password-guessing oracle.
 * **Forward-auth** (`FUTURE.md`): a `forward_auth` authenticator that issues a

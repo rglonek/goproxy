@@ -138,7 +138,11 @@ func (r *Routes) Explain(host, path, method string) []Decision {
 			decision.Matched = true
 			decision.Reason = "matched"
 			if !rule.auth.Empty() {
-				decision.Reason += fmt.Sprintf(" (requires auth: %s)", strings.Join(rule.auth.Methods(), ", "))
+				requires := "requires auth: " + strings.Join(rule.auth.Methods(), ", ")
+				if rule.allow != nil {
+					requires += "; allows " + rule.allow.String()
+				}
+				decision.Reason += " (" + requires + ")"
 			}
 		}
 		decisions = append(decisions, decision)

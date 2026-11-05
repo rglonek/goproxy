@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,17 +22,19 @@ import (
 const bcryptCacheTTL = time.Minute
 
 type basicAuth struct {
-	users             map[string]*basicUser
-	realm             string
-	forwardUserHeader string
-	forwardUserQuery  string
-	forward           bool
+	users               map[string]*basicUser
+	realm               string
+	forwardUserHeader   string
+	forwardGroupsHeader string
+	forwardUserQuery    string
+	forward             bool
 
 	cache *verifyCache
 }
 
 type basicUser struct {
-	name string
+	name   string
+	groups []string
 	// exactly one of these is set
 	hash     [sha256.Size]byte
 	bcrypted []byte
@@ -39,12 +42,13 @@ type basicUser struct {
 
 func newBasic(cfg *config.BasicAuth) (*basicAuth, error) {
 	auth := &basicAuth{
-		users:             map[string]*basicUser{},
-		realm:             cfg.Realm,
-		forwardUserHeader: cfg.ForwardUserHeader,
-		forwardUserQuery:  cfg.ForwardUserQuery,
-		forward:           cfg.Forward,
-		cache:             newVerifyCache(),
+		users:               map[string]*basicUser{},
+		realm:               cfg.Realm,
+		forwardUserHeader:   cfg.ForwardUserHeader,
+		forwardGroupsHeader: cfg.ForwardGroupsHeader,
+		forwardUserQuery:    cfg.ForwardUserQuery,
+		forward:             cfg.Forward,
+		cache:               newVerifyCache(),
 	}
 	if auth.realm == "" {
 		auth.realm = "Restricted"
@@ -53,7 +57,9 @@ func newBasic(cfg *config.BasicAuth) (*basicAuth, error) {
 	auth.realm = strings.NewReplacer(`"`, "", "\r", "", "\n", "").Replace(auth.realm)
 
 	for i, user := range cfg.Users {
-		entry := &basicUser{name: user.User}
+		// clipped, so that appending to an identity's groups copies rather
+		// than writing into the config's array
+		entry := &basicUser{name: user.User, groups: slices.Clip(user.Groups)}
 		switch {
 		case user.PasswordHash != "":
 			if _, err := bcrypt.Cost([]byte(user.PasswordHash)); err != nil {
@@ -91,9 +97,13 @@ func (b *basicAuth) Authenticate(r *http.Request) (Identity, bool) {
 	if !b.verify(entry, password) {
 		return Identity{}, false
 	}
-	identity := Identity{User: user}
+	identity := Identity{User: user, Groups: entry.groups}
 	if b.forwardUserHeader != "" {
 		identity.addHeader(b.forwardUserHeader, user)
+	}
+	// a user with no groups gets no header at all, rather than an empty one
+	if b.forwardGroupsHeader != "" && len(entry.groups) > 0 {
+		identity.addHeader(b.forwardGroupsHeader, strings.Join(entry.groups, ","))
 	}
 	if b.forwardUserQuery != "" {
 		identity.addQuery(b.forwardUserQuery, user)

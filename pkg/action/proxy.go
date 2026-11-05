@@ -87,6 +87,12 @@ func NewProxy(cfg *config.Proxy, pool *upstream.Pool, deps ProxyDeps) (*Proxy, e
 			}
 			setPath(request.Out.URL, path)
 
+			// ReverseProxy has just removed every header the client named in
+			// Connection, and "Connection: X-User" would take the identity
+			// goproxy set with it, so the identity is set again here
+			for name, values := range middleware.Identity(request.In).Headers {
+				request.Out.Header[name] = slices.Clone(values)
+			}
 			action.requestHeaders.apply(request.Out.Header)
 		},
 		Transport: &retryingTransport{action: action},

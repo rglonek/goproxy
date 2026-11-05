@@ -1,12 +1,16 @@
 // Package authn authenticates requests. An authenticator either produces an
 // Identity or refuses; a Chain tries several in order. Every authenticator
 // removes the credential it consumed, so a credential goproxy checked is never
-// also handed to the backend - including one it rejected.
+// also handed to the backend - including one it rejected. And the headers that
+// say who the client is are goproxy's alone: a client's copy of one is removed
+// before anything reads it.
 package authn
 
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"goproxy/pkg/config"
 )
@@ -24,6 +28,8 @@ type Identity struct {
 	Method  string
 	User    string
 	TokenID string
+	// Groups are what a rule's allow.groups is matched against.
+	Groups []string
 	// Headers are added to the upstream request: the authenticated user, and
 	// anything a forward-auth service asked to pass along.
 	Headers http.Header
@@ -76,6 +82,11 @@ type Authenticator interface {
 // Chain tries authenticators in order and is what a rule actually holds.
 type Chain struct {
 	authenticators []Authenticator
+	// identityHeaders are the headers goproxy fills in from the identity, keyed
+	// by config.IdentityHeaderKey; identityQuery the query parameters. A
+	// client's copy of either is removed before authentication.
+	identityHeaders map[string]bool
+	identityQuery   []string
 }
 
 // New builds the authenticator chain described by an auth block. Secrets are
@@ -107,7 +118,50 @@ func New(cfg *config.Auth) (*Chain, error) {
 		}
 		chain.authenticators = append(chain.authenticators, forward)
 	}
+
+	// every authenticator's identity headers, not only the one that will
+	// accept the request: when a token wins, the X-User that basic would have
+	// set must not arrive from the client instead
+	var names []string
+	if cfg.Basic != nil {
+		names = append(names, cfg.Basic.ForwardUserHeader, cfg.Basic.ForwardGroupsHeader)
+		if cfg.Basic.ForwardUserQuery != "" {
+			chain.identityQuery = append(chain.identityQuery, cfg.Basic.ForwardUserQuery)
+		}
+	}
+	if cfg.Forward != nil {
+		// copy_headers are not here: one may be a credential the auth service
+		// reads, so the forward authenticator removes those in Strip, once the
+		// service has answered
+		names = append(names, cfg.Forward.UserHeader, cfg.Forward.GroupsHeader)
+	}
+	chain.identityHeaders = headerKeys(names)
 	return chain, nil
+}
+
+// headerKeys is the set of header names to remove, folded so that a client
+// cannot slip one past in another case or spelled with underscores.
+func headerKeys(names []string) map[string]bool {
+	keys := map[string]bool{}
+	for _, name := range names {
+		if name != "" {
+			keys[config.IdentityHeaderKey(name)] = true
+		}
+	}
+	return keys
+}
+
+// removeHeaders deletes every header whose folded name is in keys, however
+// many times and in whatever spelling the client sent it.
+func removeHeaders(header http.Header, keys map[string]bool) {
+	if len(keys) == 0 {
+		return
+	}
+	for name := range header {
+		if keys[config.IdentityHeaderKey(name)] {
+			delete(header, name)
+		}
+	}
 }
 
 // Authenticate runs the chain. On success it returns the identity; on failure
@@ -149,6 +203,48 @@ func (c *Chain) Strip(r *http.Request) {
 	for _, authenticator := range c.authenticators {
 		authenticator.Strip(r)
 	}
+}
+
+// StripIdentity removes what a client sent in the headers and query parameters
+// that goproxy fills in from the identity - forward_user_header,
+// forward_groups_header, forward_user_query, and a forward-auth service's
+// user_header and groups_header. It runs before authentication, so no
+// authenticator sees a client's claim either, and whether or not
+// authentication then sets the header: when the authenticator that accepted
+// the request does not, the backend gets none rather than the client's.
+func (c *Chain) StripIdentity(r *http.Request) {
+	if c == nil {
+		return
+	}
+	removeHeaders(r.Header, c.identityHeaders)
+	if len(c.identityQuery) > 0 && r.URL.RawQuery != "" {
+		r.URL.RawQuery = removeQuery(r.URL.RawQuery, c.identityQuery)
+	}
+}
+
+// removeQuery drops the named parameters from a raw query string. It works on
+// the string rather than through url.Values so that the parameters it keeps
+// stay in the order and the encoding the client sent.
+func removeQuery(raw string, names []string) string {
+	parts := strings.Split(raw, "&")
+	kept := parts[:0]
+	for _, part := range parts {
+		key, _, _ := strings.Cut(part, "=")
+		if unescaped, err := url.QueryUnescape(key); err == nil {
+			key = unescaped
+		}
+		drop := false
+		for _, name := range names {
+			if key == name {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, "&")
 }
 
 // Empty reports whether the chain would let everything through.

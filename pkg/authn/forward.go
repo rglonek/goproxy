@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"goproxy/pkg/config"
 )
@@ -22,6 +23,9 @@ type forwardAuth struct {
 	requestHeaders []string
 	copyHeaders    []string
 	userHeader     string
+	groupsHeader   string
+	// copyKeys is copyHeaders folded, for removing a client's copies
+	copyKeys map[string]bool
 }
 
 func newForward(cfg *config.ForwardAuth) (*forwardAuth, error) {
@@ -35,6 +39,8 @@ func newForward(cfg *config.ForwardAuth) (*forwardAuth, error) {
 		requestHeaders: cfg.RequestHeaders,
 		copyHeaders:    cfg.CopyHeaders,
 		userHeader:     cfg.UserHeader,
+		groupsHeader:   cfg.GroupsHeader,
+		copyKeys:       headerKeys(cfg.CopyHeaders),
 		client: &http.Client{
 			Timeout: timeout,
 			// the auth service's answer is about this request; a redirect
@@ -94,11 +100,28 @@ func (f *forwardAuth) Authenticate(r *http.Request) (Identity, bool) {
 	if f.userHeader != "" {
 		identity.User = response.Header.Get(f.userHeader)
 	}
+	if f.groupsHeader != "" {
+		// "a,b", "a, b" and one header line per group all mean the same
+		for _, value := range response.Header.Values(f.groupsHeader) {
+			for _, group := range strings.Split(value, ",") {
+				if group = strings.TrimSpace(group); group != "" {
+					identity.Groups = append(identity.Groups, group)
+				}
+			}
+		}
+	}
 	return identity, true
 }
 
 func (f *forwardAuth) Challenge() string { return "" }
 
-// Strip does nothing: forward auth reads the request but consumes no
-// credential of its own.
-func (f *forwardAuth) Strip(*http.Request) {}
+// Strip consumes no credential - forward auth only reads the request - but it
+// removes the client's copies of copy_headers, which goproxy fills in from the
+// auth service's answer. That happens here rather than before authentication
+// because such a header may be what the service reads its credential from
+// (Authorization, for one), and it happens whichever authenticator accepted
+// the request, so a header the service did not answer with is absent upstream
+// rather than the client's.
+func (f *forwardAuth) Strip(r *http.Request) {
+	removeHeaders(r.Header, f.copyKeys)
+}
