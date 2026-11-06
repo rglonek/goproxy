@@ -9,7 +9,8 @@ configured by a file you wrote by hand, run by systemd.
   checking and budgeted retries
 - **Static files**, redirects and canned responses
 - **Authentication**: basic (several users, bcrypt hashes), static tokens, or
-  handing the decision to another service
+  handing the decision to another service; groups, per-rule allow lists, and
+  identity headers a client cannot forge
 - **Routing** by host (exact, wildcard, regex), path (prefix, exact, segment,
   regex) and method, first match wins
 - **TLS termination**: your own certificates with SNI, Let's Encrypt, mutual
@@ -158,6 +159,7 @@ misspelled option stops startup instead of being ignored.
 | `match.path_mode` | `prefix` (default), `exact`, `segment` (`/api` matches `/api` and `/api/v1` but not `/apifoo`), `regex` |
 | `match.methods` | Allowed methods; a request with another method falls through to the next rule |
 | `auth` | The name of an `auth` block |
+| `allow` | `users` and/or `groups`: of the identities `auth` accepts, the ones that may use the rule; anyone else gets `403`. Requires `auth`; see [Auth](#auth) |
 | `allow_ips` / `deny_ips` | CIDRs, evaluated before auth |
 | `rate_limit` | `requests_per_second`, `burst`, `by: ip\|identity` |
 | `cors` | `allow_origins`, `allow_methods`, `allow_headers`, `expose_headers`, `allow_credentials`, `max_age` |
@@ -221,24 +223,75 @@ auth:
   staff:
     basic:
       users:
-        - { user: alice, password: "wonderland" }
-        - { user: bob, password_hash: "$2y$10$..." }   # bcrypt
+        - { user: alice, password: "wonderland", groups: [admin, staff] }
+        - { user: bob, password_hash: "$2y$10$...", groups: [staff] }   # bcrypt
         - { user: carol, password_file: "/etc/goproxy/carol.pw" }
       realm: "Internal"
-      forward_user_header: X-USER
+      forward_user_header: X-USER          # X-USER: alice
+      forward_groups_header: X-GROUPS      # X-GROUPS: admin,staff
   api:
     token:
       header: X-TOKEN          # default
       accept_bearer: true      # Authorization: Bearer <token>, on by default
       tokens:
-        - { id: ci, value: "s3cr3t" }
+        - { id: ci, value: "s3cr3t", groups: [deploy] }
         - { id: deploy, value_env: DEPLOY_TOKEN }
   sso:
     forward:
       url: "http://127.0.0.1:9000/auth"   # 2xx means allowed
       user_header: X-Auth-User
-      copy_headers: [X-Auth-Groups]
+      groups_header: X-Auth-Groups        # "a,b" or "a, b"
+      copy_headers: [X-Auth-User, X-Auth-Groups]
 ```
+
+**Groups and `allow`.** A basic user or a token can carry `groups`, and a
+forward-auth service can report them in `groups_header`. A rule with `auth`
+narrows who may use it with `allow`:
+
+```yaml
+rules:
+  - name: admin
+    match: { path: /admin, path_mode: segment }
+    auth: staff
+    allow:
+      users: [carol]       # a basic user, a forward-auth user, or a token's id
+      groups: [admin]      # being in any one of them is enough
+    proxy: { url: "http://127.0.0.1:8000" }
+```
+
+An identity that is one of the `users` or has one of the `groups` gets through.
+Anyone else `auth` accepted gets `403 Forbidden` - not `401`, and no challenge,
+since signing in again would not help. Without `allow`, everyone `auth` accepts
+gets through. A refusal is logged at `info` as `authorization failed`, with the
+rule and the user name or token id but never a credential, and counted in
+`goproxy_auth_forbidden_total{rule,method}`. `-check` refuses `allow` on a rule
+without `auth`, an `allow` with no list, an empty list or nothing under it at
+all, and a user or group that nobody in the auth block has (a forward-auth
+service can name anyone, so with a `user_header` or `groups_header` any name
+goes). `explain` prints the list a matching rule applies.
+
+**Identity headers come from goproxy alone.** A backend can trust
+`forward_user_header` and `forward_groups_header` (comma-joined, no spaces; a
+user with no groups gets no header) because a client cannot supply them. On a
+rule whose auth block declares one, whatever the client sent under that name is
+removed before authentication - every copy, in any case, and with `_` for `-`,
+which CGI-style servers read as the same header - whether or not
+authentication then sets it. When a token rather than basic accepts the
+request, the backend gets no `X-USER` at all rather than the client's. The same
+holds for `forward_user_query`, and for a forward-auth service's `user_header`
+and `groups_header`, so the service never sees a client's claim either.
+`copy_headers` are removed too, but only once the service has answered, since
+one may be the credential it reads (`Authorization`, say); a header it did not
+answer with is absent upstream. A client's `Connection: X-USER`, which would
+make the proxy drop the header, does not remove goproxy's value. An identity
+header that is also where the block reads a credential - `Authorization` for
+basic or bearer tokens, the token header, a forward `request_headers` entry -
+is a config error, since removing the client's copy would lock everyone out.
+
+A rule without `auth` does not know these headers mean anything and passes them
+through like any other. If such a rule reaches a backend that trusts them,
+remove them there with `request_headers.remove`. A worked example with people in
+roles in front of one app is [examples/10-alice.yaml](examples/10-alice.yaml).
 
 ### Upstreams
 

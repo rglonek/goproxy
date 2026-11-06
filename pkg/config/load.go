@@ -41,6 +41,9 @@ func Parse(data []byte) (*Config, error) {
 		}
 		return nil, fmt.Errorf("version: must be %d, got %d", Version, config.Version)
 	}
+	if i := emptyAllow(data); i >= 0 && i < len(config.Rules) && config.Rules[i] != nil {
+		return nil, fmt.Errorf("rules[%d]%s.allow: is empty; list users or groups, or leave allow out", i, nameSuffix(config.Rules[i].Name))
+	}
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -101,6 +104,25 @@ func legacyHint(data []byte) []string {
 		return nil
 	}
 	return found
+}
+
+// emptyAllow returns the index of the first rule with an allow key and nothing
+// under it, or -1. The decoder reads that as no allow block at all, which lets
+// everyone the auth block accepts through: the opposite of what writing allow
+// meant, and what commenting out every entry under it would otherwise do.
+func emptyAllow(data []byte) int {
+	var probe struct {
+		Rules []map[string]yaml.Node `yaml:"rules"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return -1
+	}
+	for i, rule := range probe.Rules {
+		if node, ok := rule["allow"]; ok && node.ShortTag() == "!!null" {
+			return i
+		}
+	}
+	return -1
 }
 
 // cleanYAMLError turns the decoder's multi-line type error into something that

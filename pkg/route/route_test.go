@@ -182,6 +182,30 @@ func TestExplain(t *testing.T) {
 	}
 }
 
+func TestExplainNamesTheAllowList(t *testing.T) {
+	routes := compile(t, `
+version: 2
+listeners:
+  http: { addr: ":8080" }
+auth:
+  people:
+    basic:
+      users: [{ user: robert, password: x, groups: [owner] }]
+rules:
+  - name: owner-only
+    auth: people
+    allow: { users: [robert], groups: [owner] }
+    respond: { status: 200, body: ok }
+`)
+	decisions := routes.Explain("example.com", "/", "GET")
+	if len(decisions) != 1 || !decisions[0].Matched {
+		t.Fatalf("decisions = %+v", decisions)
+	}
+	if got, want := decisions[0].Reason, "matched (requires auth: basic; allows users robert; groups owner)"; got != want {
+		t.Errorf("reason = %q, want %q", got, want)
+	}
+}
+
 func TestNormalizeHost(t *testing.T) {
 	tests := map[string]string{
 		"Example.COM":      "example.com",

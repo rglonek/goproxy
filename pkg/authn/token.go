@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -12,13 +13,14 @@ import (
 )
 
 // DefaultTokenHeader is where a token is read from when the rule does not say.
-const DefaultTokenHeader = "X-TOKEN"
+const DefaultTokenHeader = config.DefaultTokenHeader
 
 type tokenAuth struct {
 	header       string
 	acceptBearer bool
 	forward      bool
 	ids          []string
+	groups       [][]string
 	hashes       [][sha256.Size]byte
 }
 
@@ -41,6 +43,7 @@ func newToken(cfg *config.TokenAuth) (*tokenAuth, error) {
 			id = strconv.Itoa(i)
 		}
 		auth.ids = append(auth.ids, id)
+		auth.groups = append(auth.groups, slices.Clip(token.Groups))
 		auth.hashes = append(auth.hashes, sha256.Sum256([]byte(value)))
 	}
 	return auth, nil
@@ -65,7 +68,7 @@ func (t *tokenAuth) Authenticate(r *http.Request) (Identity, bool) {
 	if index == -1 {
 		return Identity{}, false
 	}
-	return Identity{TokenID: t.ids[index]}, true
+	return Identity{TokenID: t.ids[index], Groups: t.groups[index]}, true
 }
 
 func (t *tokenAuth) presented(r *http.Request) string {

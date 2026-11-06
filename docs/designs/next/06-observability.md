@@ -117,6 +117,7 @@ goproxy_upstream_duration_seconds{upstream,target}                  histogram
 goproxy_upstream_healthy{upstream,target}                           gauge
 goproxy_upstream_retries_total{upstream}                            counter
 goproxy_auth_failures_total{rule,method}                            counter
+goproxy_auth_forbidden_total{rule,method}                           counter
 goproxy_ratelimit_dropped_total{rule}                               counter
 goproxy_tls_handshakes_total{version,result}                        counter
 goproxy_tls_cert_expiry_seconds{subject}                            gauge

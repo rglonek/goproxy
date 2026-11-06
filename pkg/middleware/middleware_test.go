@@ -1,12 +1,17 @@
 package middleware
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"goproxy/pkg/authn"
+	"goproxy/pkg/config"
+	"goproxy/pkg/observe"
 )
 
 func serve(handler http.Handler, r *http.Request) *httptest.ResponseRecorder {
@@ -204,5 +209,52 @@ func TestRecorderDefaultsToOK(t *testing.T) {
 	_, _ = writer.Write([]byte("no explicit status"))
 	if writer.Status() != http.StatusOK {
 		t.Errorf("status = %d, want 200", writer.Status())
+	}
+}
+
+// A client that authenticated but is not on the rule's allow list gets 403
+// with no challenge: asking it for credentials again cannot help.
+func TestAuthorize(t *testing.T) {
+	allow := authn.NewAllowlist(&config.Allow{Groups: []string{"owner"}})
+	metrics := observe.NewMetrics("test", "test")
+	var logs strings.Builder
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	reached := false
+	handler := Authorize(allow, "owner-only", metrics, log)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached = true
+	}))
+
+	request, state := withState(httptest.NewRequest("GET", "/", nil))
+	state.Identity = authn.Identity{Method: authn.MethodBasic, User: "gina", Groups: []string{"guest"}}
+	recorder := serve(handler, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", recorder.Code)
+	}
+	if got := recorder.Header().Get("WWW-Authenticate"); got != "" {
+		t.Errorf("WWW-Authenticate = %q, want none", got)
+	}
+	if reached {
+		t.Error("the action ran for a refused client")
+	}
+	if state.Err != "forbidden" {
+		t.Errorf("state.Err = %q", state.Err)
+	}
+	if !strings.Contains(logs.String(), "authorization failed") || !strings.Contains(logs.String(), "user=gina") {
+		t.Errorf("log = %q, want the refusal and who it was", logs.String())
+	}
+	var exposition strings.Builder
+	_, _ = metrics.Registry().WriteTo(&exposition)
+	if !strings.Contains(exposition.String(), `goproxy_auth_forbidden_total{rule="owner-only",method="basic"} 1`) {
+		t.Errorf("metrics = %s", exposition.String())
+	}
+
+	request, state = withState(httptest.NewRequest("GET", "/", nil))
+	state.Identity = authn.Identity{Method: authn.MethodBasic, User: "robert", Groups: []string{"owner"}}
+	if recorder := serve(handler, request); recorder.Code != http.StatusOK || !reached {
+		t.Errorf("status = %d, reached = %v, want an owner through", recorder.Code, reached)
+	}
+
+	if Authorize(nil, "open", metrics, log) != nil {
+		t.Error("a rule without allow got an authorization stage")
 	}
 }

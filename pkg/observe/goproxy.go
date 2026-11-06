@@ -23,6 +23,7 @@ type Metrics struct {
 	UpstreamRetries  *Counter
 
 	AuthFailures     *Counter
+	AuthForbidden    *Counter
 	RateLimitDropped *Counter
 	IPFilterDropped  *Counter
 
@@ -49,6 +50,7 @@ func NewMetrics(version, commit string) *Metrics {
 		UpstreamHealthy:  r.Gauge("goproxy_upstream_healthy", "1 when a target is in service, 0 when it has been ejected.", "upstream", "target"),
 		UpstreamRetries:  r.Counter("goproxy_upstream_retries_total", "Requests retried against another target.", "upstream"),
 		AuthFailures:     r.Counter("goproxy_auth_failures_total", "Rejected credentials, by rule and method.", "rule", "method"),
+		AuthForbidden:    r.Counter("goproxy_auth_forbidden_total", "Authenticated requests refused by a rule's allow list, by rule and method.", "rule", "method"),
 		RateLimitDropped: r.Counter("goproxy_ratelimit_dropped_total", "Requests refused by a rate limit.", "rule"),
 		IPFilterDropped:  r.Counter("goproxy_ipfilter_dropped_total", "Requests refused by an IP allow or deny list.", "rule"),
 		TLSHandshakes:    r.Counter("goproxy_tls_handshakes_total", "TLS handshakes, by version and outcome.", "version", "result"),

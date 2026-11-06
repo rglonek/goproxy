@@ -27,6 +27,7 @@ go run ./test/logwww    # listens on :8081
 | [07-lets-encrypt.yaml](07-lets-encrypt.yaml) | Automatic certificates from Let's Encrypt |
 | [08-load-balancing.yaml](08-load-balancing.yaml) | Several targets, health checking, retries |
 | [09-hardening-and-observability.yaml](09-hardening-and-observability.yaml) | Every default written out, plus the admin listener |
+| [10-alice.yaml](10-alice.yaml) | One app with people in roles: groups, identity headers a client cannot forge, per-rule `allow` lists |
 
 The full set of options is the configuration reference in the
 [main README](../README.md). Upgrading from v0.x? See
